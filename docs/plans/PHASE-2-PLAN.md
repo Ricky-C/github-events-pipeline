@@ -8,29 +8,31 @@
 
 ## Acceptance Criteria (from exercise, verbatim)
 
-- [ ] Raw event payloads are retained for audit/debug purposes *(done in Phase 1 — `raw_events`)*
-- [ ] Queryable without JSON parsing: repository identifier, push identifier, ref, head, before
-- [ ] Data modeling choices are documented at a high level
+- [x] Raw event payloads are retained for audit/debug purposes *(done in Phase 1 — `raw_events`)*
+- [x] Queryable without JSON parsing: repository identifier, push identifier, ref, head, before
+- [x] Data modeling choices are documented at a high level
 
 ## Tasks
 
-- [ ] `push_events` migration:
+- [x] `push_events` migration:
   - `github_event_id` (string, unique index, FK-by-convention to `raw_events`)
   - `push_id` (bigint, indexed), `ref`, `head_sha`, `before_sha`
   - `repository_github_id` (bigint, indexed), `repository_name`
   - `actor_github_id` (bigint, indexed), `actor_login`
   - `event_created_at` (indexed — "over time" analysis is the stated business goal)
-- [ ] `PushEventParser` service: raw payload → attribute hash; returns a result object (`ok` / `malformed` + reason); length-validates string fields (see docs/THREAT-MODEL.md)
-- [ ] Ingest pipeline: raw insert + structured insert in **one transaction**; structured upsert keyed on `github_event_id`
-- [ ] Malformed-payload path: raw row always persists; structured row skipped; single warn-level log with reason and event id (graceful — no raise)
-- [ ] Data-modeling rationale written into PR body and `docs/DECISIONS.md` (why columns-not-views, why keep raw + structured, index choices)
+- [x] `PushEventParser` service: raw payload → attribute hash; returns a result object (`ok` / `malformed` + reason); length-validates string fields (see docs/THREAT-MODEL.md)
+- [x] Ingest pipeline: raw insert + structured insert in **one transaction**; structured upsert keyed on `github_event_id`
+- [x] Malformed-payload path: raw row always persists; structured row skipped; single warn-level log with reason and event id (graceful — no raise)
+- [x] Data-modeling rationale written into PR body and `docs/DECISIONS.md` (why columns-not-views, why keep raw + structured, index choices) — D-020
 
 ## Exit Criteria
 
-- [ ] The five required fields answerable via plain SQL, no JSON operators
-- [ ] A deliberately mangled fixture payload ingests without error: raw persisted, structured skipped, warning logged
-- [ ] Re-running ingestion over the same events yields zero structured duplicates
-- [ ] Parser unit specs cover happy path + ≥3 malformed shapes (missing keys, wrong types, oversized strings)
+All executed live on 2026-07-08 (observed output in the PR):
+
+- [x] The five required fields answerable via plain SQL, no JSON operators — `SELECT repository_github_id, push_id, ref, head_sha, before_sha FROM push_events ORDER BY event_created_at DESC LIMIT 5` returned 5 rows, no JSON operators
+- [x] A deliberately mangled fixture payload ingests without error: raw persisted, structured skipped, warning logged — spec-level by design (real fixture PushEvent with `push_id` deleted): raw kept, no structured row, one `ingest.structured_skipped` warn, nothing raised
+- [x] Re-running ingestion over the same events yields zero structured duplicates — live: GitHub re-served the same page (`duplicates_skipped: 25, push_events_new: 0`), then `count(*) = count(DISTINCT github_event_id) = 52`; deterministic proof in the re-ingest and self-heal specs
+- [x] Parser unit specs cover happy path + ≥3 malformed shapes (missing keys, wrong types, oversized strings) — 29 parser examples: 5 missing-key, 4 wrong-type, 3 oversized, plus NUL, hex-discipline, and storability-range cases; suite total 123 examples, 0 failures; RuboCop and Brakeman clean
 
 ## Out of Scope
 
@@ -38,4 +40,5 @@ Actor/repo enrichment tables (Phase 3) — this phase only extracts what's alrea
 
 ## Notes / Discovered Work
 
-_(append during the phase)_
+- Pre-Phase-2 `raw_events` rows get no automatic backfill: the structured insert runs for every parsed-ok row on each ingest (D-020), so events that re-appear in the feed self-heal; the remainder is dev data, covered by a one-off console rebuild from raw if ever needed. Deliberately not built.
+- Composite index `(repository_github_id, event_created_at)` considered and deferred until a real query needs it — the plan's single-column indexes stand.
