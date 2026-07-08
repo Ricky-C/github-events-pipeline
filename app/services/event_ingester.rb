@@ -19,11 +19,6 @@ class EventIngester
   # dies client-side as JSON::GeneratorError before PG ever sees it —
   # treating only the former as row-scoped cost a whole page (D-021).
   ROW_ERRORS = [ ActiveRecord::StatementInvalid, JSON::GeneratorError ].freeze
-  # Failures that describe contention, not the row's data. Scrubbing on
-  # these would stamp a false payload_scrubbed marker onto an innocent
-  # payload, so their one retry goes in unmodified (D-021).
-  TRANSIENT_ERRORS = [ ActiveRecord::TransactionRollbackError, ActiveRecord::LockWaitTimeout,
-                       ActiveRecord::QueryCanceled ].freeze
 
   # Single owner of the counts shape — also the zero for callers whose
   # cycle never reaches ingest (IngestRunner logs it on non-ok polls).
@@ -140,11 +135,13 @@ class EventIngester
     end
   end
 
-  # A refused row gets one retry: unmodified when the failure was
-  # contention (deadlock, lock/statement timeout — retrying is the honest
-  # remedy), scrubbed when it was the data ("\u0000" or invalid bytes
-  # anywhere in the payload, unstorable in jsonb — D-018, D-021). A row
-  # that fails both attempts counts as rejected.
+  # A refused row gets one retry: scrubbed only when the failure describes
+  # the row's data ("\u0000" or invalid bytes in the payload, unstorable
+  # in jsonb — D-018, D-021), unmodified for everything else — contention,
+  # connection blips, unforeseen refusals. Classifying by data-shape rather
+  # than enumerating transients means a false payload_scrubbed marker can
+  # never be stamped onto an authentic payload by an error a list missed.
+  # A row that fails both attempts counts as rejected.
   def insert_each(rows, batch_error:)
     inserted = 0
     rejected_ids = []
@@ -152,9 +149,8 @@ class EventIngester
       inserted += insert_batch([ row ])
     rescue *ROW_ERRORS => e
       begin
-        transient = TRANSIENT_ERRORS.any? { |error_class| e.is_a?(error_class) }
-        inserted += insert_batch([ transient ? row : scrub(row) ])
-        warn_ingest("ingest.malformed", "payload_scrubbed", detail: row[:github_event_id]) unless transient
+        inserted += insert_batch([ data_shaped?(e) ? scrub(row) : row ])
+        warn_ingest("ingest.malformed", "payload_scrubbed", detail: row[:github_event_id]) if data_shaped?(e)
       rescue *ROW_ERRORS => retry_error
         rejected_ids << row[:github_event_id]
         warn_ingest("ingest.malformed", "row_rejected",
@@ -167,6 +163,13 @@ class EventIngester
     # so the caller's backoff and loud one-shot paths see it.
     raise batch_error if rejected_ids.size == rows.size
     { inserted: inserted, rejected_ids: rejected_ids }
+  end
+
+  # Data-shaped: jsonb couldn't serialize the payload client-side, or PG
+  # refused the values themselves (SQLSTATE class 22 — NUL escapes, invalid
+  # encoding, numeric overflow). Everything else is not the row's fault.
+  def data_shaped?(error)
+    error.is_a?(JSON::GeneratorError) || error.cause.is_a?(PG::DataException)
   end
 
   def scrub(row)

@@ -209,6 +209,22 @@ RSpec.describe EventIngester do
       expect(logger.messages(:warn)).to be_empty
     end
 
+    it "retries a connection-blip row unscrubbed too — data shape, not an allowlist, decides" do
+      attempts = 0
+      allow(RawEvent).to receive(:insert_all).and_wrap_original do |original, *args, **kwargs|
+        attempts += 1
+        raise ActiveRecord::ConnectionFailed, "server closed the connection unexpectedly" if attempts <= 2
+        original.call(*args, **kwargs)
+      end
+
+      counts = ingester.ingest([ pushes[0] ])
+
+      expect(counts).to eq(counts_with(events_seen: 1, push_events_new: 1))
+      expect(RawEvent.find_by!(github_event_id: pushes[0]["id"]).payload)
+        .not_to have_key("payload_scrubbed")
+      expect(logger.messages(:warn)).to be_empty
+    end
+
     it "rolls back the raw rows when the structured insert fails — no torn events" do
       allow(PushEvent).to receive(:insert_all)
         .and_raise(ActiveRecord::StatementInvalid.new("boom"))
