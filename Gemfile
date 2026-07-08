@@ -1,5 +1,10 @@
 source "https://rubygems.org"
 
+# Single source of truth for the Ruby version: CI reads .ruby-version via
+# setup-ruby, the Dockerfile ARG must match, and this pin makes bundler fail
+# the image build if they ever drift.
+ruby file: ".ruby-version"
+
 gem "rails", "~> 8.1.3"
 # Use postgresql as the database for Active Record
 gem "pg", "~> 1.1"

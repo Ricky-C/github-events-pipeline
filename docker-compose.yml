@@ -6,19 +6,30 @@ x-app: &app
   build: .
   environment: &app-env
     RAILS_ENV: development
-    DATABASE_URL: postgres://postgres:${POSTGRES_PASSWORD:-postgres}@db:5432/github_events_pipeline_development
+    # Connection pieces are passed discretely (read by config/database.yml)
+    # rather than as a DATABASE_URL, so the password never travels through
+    # URL parsing and RAILS_ENV alone selects the database (docs/DECISIONS.md D-012).
+    PGHOST: db
+    PGUSER: postgres
+    PGPASSWORD: ${POSTGRES_PASSWORD:-postgres}
 
 services:
   db:
     image: postgres:16
     environment:
+      # The postgres image applies this only while initializing an empty
+      # db-data volume — changing it after first boot breaks app auth until
+      # `docker compose down -v` recreates the volume.
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
     volumes:
       - db-data:/var/lib/postgresql/data
     # No host port mapping by design: nothing outside the compose network
     # needs the db (docs/THREAT-MODEL.md threat 7).
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      # -h 127.0.0.1 forces TCP: the image's first-run initdb starts a
+      # socket-only temporary server that would otherwise pass this check
+      # before the real server is listening on 5432.
+      test: ["CMD-SHELL", "pg_isready -U postgres -h 127.0.0.1"]
       interval: 5s
       timeout: 3s
       retries: 10
@@ -60,16 +71,13 @@ services:
         condition: service_completed_successfully
     profiles: [tools]
 
-  # docker compose run --rm test — prepares its own test database.
+  # docker compose run --rm test — prepares its own test database
+  # (RAILS_ENV alone selects it via config/database.yml).
   test:
     build: .
     environment:
       <<: *app-env
       RAILS_ENV: test
-      # Eager load in the suite (test.rb keys off CI) so boot errors in any
-      # autoloaded file fail tests, not the running services.
-      CI: "true"
-      DATABASE_URL: postgres://postgres:${POSTGRES_PASSWORD:-postgres}@db:5432/github_events_pipeline_test
     command: bash -c "bin/rails db:prepare && bundle exec rspec"
     depends_on:
       db:

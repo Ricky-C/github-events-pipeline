@@ -5,7 +5,8 @@
 # D-010); the test compose service overrides to RAILS_ENV=test. All gem groups
 # are installed — one image serves ingester, worker, migrate, test, and console.
 
-# Make sure RUBY_VERSION matches the Ruby version in .ruby-version
+# Must match .ruby-version — the Gemfile's `ruby file:` pin makes bundler
+# fail the image build if this ARG drifts from it.
 ARG RUBY_VERSION=3.4.10
 FROM docker.io/library/ruby:$RUBY_VERSION-slim AS base
 
@@ -31,8 +32,9 @@ RUN apt-get update -qq && \
     apt-get install --no-install-recommends -y build-essential git libpq-dev libyaml-dev pkg-config && \
     rm -rf /var/lib/apt/lists /var/cache/apt/archives
 
-# Gems cached in their own layer: only Gemfile changes invalidate it
-COPY Gemfile Gemfile.lock ./
+# Gems cached in their own layer: only Gemfile/Ruby changes invalidate it
+# (.ruby-version is read by the Gemfile's `ruby file:` pin)
+COPY .ruby-version Gemfile Gemfile.lock ./
 
 RUN bundle install && \
     rm -rf ~/.bundle/ "${BUNDLE_PATH}"/ruby/*/cache "${BUNDLE_PATH}"/ruby/*/bundler/gems/*/.git && \

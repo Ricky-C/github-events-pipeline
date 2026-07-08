@@ -72,6 +72,12 @@ Format: **Context → Decision → Consequences (incl. what we gave up)**
 **Decision:** Delete all three at scaffold time: no puma/`config/puma.rb`, no `credentials.yml.enc`/`master.key`, no `config/environments/production.rb` or database.yml production section. Unused railties (mailer, mailbox, text, storage, cable) also removed.
 **Consequences:** The repo contains nothing that can leak and nothing listening; the "no secrets" claim is verifiable by absence, not policy. Cost: a future inbound surface (health endpoint, metrics) would need puma reintroduced — one Gemfile line, recorded here so it reads as a decision, not an accident.
 
+## D-012: Discrete PG* connection vars instead of DATABASE_URL
+
+**Context:** Phase 0 code review found two failure modes in composing a `DATABASE_URL` from `${POSTGRES_PASSWORD}`: reserved characters in an overridden password break URI parsing (while the db itself accepts the password), and the database name was pinned in the URL so `RAILS_ENV` alone didn't select the database.
+**Decision:** Pass `PGHOST`/`PGUSER`/`PGPASSWORD` discretely; `config/database.yml` reads them explicitly and owns the env→database mapping.
+**Consequences:** Passwords never travel through URL parsing (any characters work); `RAILS_ENV` is the single switch between dev and test databases; compose and CI share the same mechanism. Cost: no single copy-pasteable connection URL — acceptable, nothing external consumes one. The related caveat that the postgres image bakes the password into the volume at first initdb is now documented in compose and `.env.example`.
+
 ---
 
 _Append new entries below as D-00N during each phase._

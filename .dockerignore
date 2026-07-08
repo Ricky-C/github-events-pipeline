@@ -33,6 +33,14 @@
 # Ignore CI service files.
 /.github
 
+# Docs never affect the runtime image; excluding them keeps docs-only
+# changes (required in every PR) from invalidating the COPY layer.
+/docs
+/README.md
+/CLAUDE.md
+/DESIGN.md
+/.claude
+
 # Ignore development files
 /.devcontainer
 

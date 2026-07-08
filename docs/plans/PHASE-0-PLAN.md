@@ -15,7 +15,7 @@ A clean-checkout-bootable foundation so every subsequent PR is a pure feature di
   - [x] `migrate`: **one-shot** service running `db:prepare`, depends_on db healthy — the ONLY service that touches migrations (prevents concurrent-migration races)
   - [x] `ingester` / `worker` (stub for now): `depends_on: {migrate: {condition: service_completed_successfully}}`
   - [x] Service stubs for `ingest` (one-shot) and `test` (wired fully in later phases; `test` prepares its own RAILS_ENV=test database)
-- [x] `.env.example` for `DATABASE_URL` etc. (compose defaults work without a real `.env`)
+- [x] `.env.example` documenting the only override, `POSTGRES_PASSWORD` (compose defaults work without a real `.env`; connection settings are discrete PG* vars, not a `DATABASE_URL` — see D-012)
 - [x] RSpec installed and running (one placeholder spec)
 - [x] Rails logger configured for stdout, JSON formatter as the ONLY formatter; log level `info`; ActiveRecord SQL logging quieted — `docker compose logs -f` must show structured lines only, no framework noise
 - [x] Environment decision applied (see docs/DECISIONS.md D-010): containers run `RAILS_ENV=development` for zero-secret boot; behavior that differs by env (job adapter, logging, eager loading) is configured explicitly rather than inherited
@@ -37,6 +37,6 @@ Any GitHub API code, any domain tables. Solid Queue setup deferred to Phase 3 (i
 
 - Rails resolved to **8.1.3** (docs say "Rails 8"; 8.1 is the current 8.x line). Generator run inside a throwaway `ruby:3.4` container — no host Ruby required, consistent with "the container is the source of truth."
 - Went further than the plan on trimming: removed puma (no HTTP server at all), credentials/master.key, and `config/environments/production.rb`. Recorded as D-011.
-- The compose `test` service sets `CI=true` so the suite eager-loads the whole app — a leftover `app/mailers/` referencing the removed ActionMailer railtie crashed the ingester but passed a lazy-loading test run; eager loading in the suite closes that gap permanently.
+- The test env eager-loads the whole app **unconditionally** (`config.eager_load = true` in test.rb) — a leftover `app/mailers/` referencing the removed ActionMailer railtie crashed the ingester but passed a lazy-loading test run; eager loading in the suite closes that gap permanently. (Originally keyed off `CI=true`; made unconditional during review remediation so ad-hoc rspec runs keep the guarantee.)
 - GitHub Actions CI (scan/lint/test with a Postgres service container) kept per maintainer preference; local Docker commands remain the canonical verification path.
 - `bundler-audit --update` needs `git` in the runtime image; added (advisory-db clone happens in-container).

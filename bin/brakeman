@@ -2,6 +2,7 @@
 require "rubygems"
 require "bundler/setup"
 
-ARGV.unshift("--ensure-latest")
-
+# No --ensure-latest: the locked brakeman would exit non-zero the moment a
+# newer version ships upstream, failing CI with no change to this repo.
+# Dependabot owns version bumps.
 load Gem.bin_path("brakeman", "brakeman")
