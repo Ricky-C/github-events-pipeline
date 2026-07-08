@@ -32,7 +32,7 @@ All executed live on 2026-07-08 (observed output in the PR):
 - [x] The five required fields answerable via plain SQL, no JSON operators — `SELECT repository_github_id, push_id, ref, head_sha, before_sha FROM push_events ORDER BY event_created_at DESC LIMIT 5` returned 5 rows, no JSON operators
 - [x] A deliberately mangled fixture payload ingests without error: raw persisted, structured skipped, warning logged — spec-level by design (real fixture PushEvent with `push_id` deleted): raw kept, no structured row, one `ingest.structured_skipped` warn, nothing raised
 - [x] Re-running ingestion over the same events yields zero structured duplicates — live: GitHub re-served the same page (`duplicates_skipped: 25, push_events_new: 0`), then `count(*) = count(DISTINCT github_event_id) = 52`; deterministic proof in the re-ingest and self-heal specs
-- [x] Parser unit specs cover happy path + ≥3 malformed shapes (missing keys, wrong types, oversized strings) — 29 parser examples: 5 missing-key, 4 wrong-type, 3 oversized, plus NUL, hex-discipline, and storability-range cases; suite total 123 examples, 0 failures; RuboCop and Brakeman clean
+- [x] Parser unit specs cover happy path + ≥3 malformed shapes (missing keys, wrong types, oversized strings) — 29 parser examples at criteria execution: 5 missing-key, 4 wrong-type, 3 oversized, plus NUL, hex-discipline, and storability-range cases; suite total 123 examples, 0 failures; RuboCop and Brakeman clean. After review remediation (D-021, final HEAD): 39 parser examples (adds invalid-UTF-8, calendar-normalization, zone-less, scrubbed-marker cases), suite 140 examples, 0 failures, RuboCop and Brakeman clean
 
 ## Out of Scope
 
