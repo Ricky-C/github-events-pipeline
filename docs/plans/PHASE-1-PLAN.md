@@ -42,4 +42,4 @@ Structured `push_events` columns (Phase 2). Enrichment (Phase 3). Final log form
 
 ## Notes / Discovered Work
 
-_(append during the phase)_
+- From Phase 0 security review: before external strings first reach the logger, harden `JsonLogFormatter` — reserved `ts`/`level` keys must win over hash-message keys, and the string path needs `.scrub` so invalid UTF-8 can't raise `JSON::GeneratorError` mid-loop. Extend the injection spec matrix (control chars, invalid UTF-8, reserved-key collision).
