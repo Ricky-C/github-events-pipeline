@@ -12,8 +12,10 @@ The single chokepoint for all GitHub API traffic (CLAUDE.md Golden Rule 3). This
 
 ```ruby
 class GithubClient
-  # Injectable for tests. Defaults are production wiring.
-  def initialize(state: RateLimitState, clock: Time, http: nil)
+  # Injectable for tests. Defaults are production wiring. state: is the
+  # only seam — WebMock covers transport and nothing here reads a clock
+  # (docs/DECISIONS.md D-019).
+  def initialize(state: RateLimitState)
 
   # GET https://api.github.com/events using the persisted ETag.
   # Persists new ETag + rate state from response headers.
@@ -45,7 +47,7 @@ Immutable value object. Exactly one `status` per call:
 | `:transient_error` | 5xx, timeout, connection/DNS failure, unparseable body, body over size cap | `error` (class + message), `rate`? |
 | `:rejected_url` | `fetch_resource` refused the URL pre-flight (no request made) | `error` (reason) |
 
-`poll_interval` only on `/events` responses. `rate` = `{remaining: Integer?, reset_at: Time?}` — nil-able before first response.
+`poll_interval` only on `/events` responses. `rate` = `{remaining: Integer?, reset_at: Time?}` — nil-able before first response. `retry_after` = integer seconds, normalized from both the delta-seconds and HTTP-date forms of the header; callers must prefer it over `reset_at` when both are present (secondary limits ask for a short wait while the primary reset sits far out).
 
 Convenience predicates: `ok?`, `not_modified?`, `rate_limited?`, `terminal?` (`:not_found` or `:rejected_url`), `retryable?` (`:transient_error`).
 
@@ -84,15 +86,16 @@ Refuse — returning `:rejected_url` *without making any request* — unless **a
 
 ### Redirect policy
 
-GitHub returns `301` for renamed repos/users. Follow **at most one** redirect, and only if the `Location` passes the same URL guard. A second redirect, or a guarded-out target → `:transient_error` (redirect loop) / `:rejected_url` (bad target). The redirect hop consumes budget like any request — count it.
+GitHub returns `301` for renamed repos/users. Follow **at most one** redirect, and only if the `Location` passes the same URL guard. The `Location` is first resolved against the request URI (RFC 7231 permits relative forms; an absolute `Location` wins the join), so a same-origin relative redirect is followed rather than misread as a scheme change. A second redirect, or a guarded-out target → `:transient_error` (redirect loop) / `:rejected_url` (bad target); a missing, blank, or unresolvable `Location` → `:transient_error`. The redirect hop consumes budget like any request — count it.
 
 ## Rate-State Bookkeeping
 
 After **every** real (non-304-shortcut… i.e., every actual HTTP) response, including errors, when headers are present:
 
 - persist `x-ratelimit-remaining` → `remaining`, `x-ratelimit-reset` (epoch) → `reset_at`, now → `updated_at`
-- `/events` responses: persist `etag` and `x-poll-interval`
+- `/events` responses: persist `x-poll-interval`; persist `etag` **only from a 200 whose body parsed** — an unparseable 200 must not advance the stored ETag past a page that was never ingested (the next conditional poll would 304 against content we never landed)
 - **ETags are stored and echoed verbatim** — GitHub returns weak ETags (`W/"..."`); stripping the `W/` prefix means it never matches, every poll silently costs budget, and the core design is defeated invisibly
+- **304s may not be free in practice** — despite GitHub's documentation, a live 304 was observed carrying a decremented `x-ratelimit-remaining` (D-017). The mirror records whatever headers say; no code may assume 304s cost nothing
 - `fetch_resource` with `etag:` given → on `304`, return `:not_modified` (caller keeps existing record; refresh `fetched_at` only)
 
 **Concurrency note (accepted, documented):** ingester and worker may interleave writes; last-write-wins is acceptable because headers self-correct within one request and `ENRICHMENT_RESERVE` absorbs the race. No row locking. (Record as part of D-006 lineage if questioned.)
@@ -127,7 +130,7 @@ loop:
   case r.status
   when :ok           -> ingest(r.body); sleep max(r.poll_interval, floor)
   when :not_modified -> sleep max(r.poll_interval_or_last_known, floor)
-  when :rate_limited -> sleep (r.rate.reset_at - now) + jitter
+  when :rate_limited -> sleep (r.retry_after || (r.rate.reset_at - now)) + jitter   # retry-after wins when present
   when :transient_error -> sleep backoff(attempt++)   # capped; never exit
 ```
 
@@ -138,7 +141,7 @@ r = client.fetch_resource(record.url, etag: record.etag)
 case r.status
 when :ok            -> persist enrichment
 when :not_modified  -> touch fetched_at
-when :rate_limited  -> park(until: (r.rate.reset_at || now + 60) + jitter)
+when :rate_limited  -> park(until: (r.retry_after ? now + r.retry_after : (r.rate.reset_at || now + 60)) + jitter)  # retry_after is a duration; reset_at an instant
 when :not_found     -> mark not_found (terminal)
 when :rejected_url  -> mark rejected + security log (terminal)
 when :transient_error -> raise for Solid Queue retry (backoff, capped)
@@ -148,15 +151,20 @@ when :transient_error -> raise for Solid Queue retry (backoff, capped)
 
 - [ ] Sends UA / Accept / API-version headers on every request
 - [ ] `/events`: stores ETag from 200; sends it as `If-None-Match` on next poll
-- [ ] 304 → `:not_modified`; persisted `remaining` unchanged
+- [ ] 200 with an ETag but an unparseable body → `:transient_error`, stored ETag not advanced
+- [ ] 304 → `:not_modified`; a header-less 304 leaves persisted `remaining` unchanged, while rate headers a 304 does carry are mirrored (observed live: 304s can arrive with a decremented remaining — docs/DECISIONS.md D-017)
 - [ ] Parses and exposes `x-poll-interval`
 - [ ] 200 updates persisted `remaining`/`reset_at`; visible via `budget`
 - [ ] 403 with remaining=0 → `:rate_limited` with correct `reset_at`
 - [ ] 429 with `retry-after` → `:rate_limited`, `retry_after` exposed
+- [ ] `Retry-After` in HTTP-date form → normalized to integer seconds
 - [ ] 404 → `:not_found`
 - [ ] 5xx / timeout / bad JSON / oversized body → `:transient_error` (four separate specs)
+- [ ] Oversized body still mirrors the response's rate headers
+- [ ] Numeric headers parse as base 10 (a leading zero is not octal)
 - [ ] URL guard allow/deny table: `https://api.github.com/users/x` ✓; `http://api.github.com/...` ✗; `https://api.github.com.evil.com/...` ✗; `https://evil.com/...` ✗; `https://api.github.com:8443/...` ✗; `https://user@api.github.com/...` ✗; IP literal ✗ — all deny cases make **zero** HTTP requests
 - [ ] 301 followed once when target passes guard; second 301 → `:transient_error`; guarded-out target → `:rejected_url`
+- [ ] Relative 301 `Location` resolved against the request URI and followed
 - [ ] `budget.unknown?` true before any response; false after
 - [ ] Weak ETag (`W/"abc"`) from 200 is sent back byte-identical in `If-None-Match` (no prefix stripping)
 - [ ] `spendable?(reserve: 5)` boundary: remaining 6 → true, 5 → false

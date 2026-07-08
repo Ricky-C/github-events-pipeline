@@ -50,12 +50,11 @@ services:
       db:
         condition: service_healthy
 
-  # Phase 0 stub: proves boot, logging, and service wiring — the boot.ok line
-  # is evidence of env + live Postgres connectivity (a failed SELECT crashes
-  # the service instead of logging). Replaced by the real poll loop in Phase 1.
+  # Continuous poll loop: honors X-Poll-Interval, parks until reset when
+  # rate-limited, capped backoff on transient errors — never exits nonzero.
   ingester:
     <<: *app
-    command: ["bin/rails", "runner", 'Rails.logger.info({component: "ingester", event: "boot.ok", rails_env: Rails.env, db: ActiveRecord::Base.connection.select_value("SELECT 1") && "connected"}); loop { Rails.logger.info({component: "ingester", event: "heartbeat.stub", msg: "poll loop arrives in Phase 1"}); sleep 30 }']
+    command: ["bin/rails", "runner", "IngestRunner.new.run"]
     depends_on:
       migrate:
         condition: service_completed_successfully
@@ -70,10 +69,12 @@ services:
         condition: service_completed_successfully
     restart: unless-stopped
 
-  # One-shot ingestion (docker compose run --rm ingest). Stub until Phase 1.
+  # One-shot ingestion (docker compose run --rm ingest): exactly one poll
+  # cycle, no sleep. One-shot is an explicit argument here rather than an
+  # env flag so the mode is visible where the service is defined (D-016).
   ingest:
     <<: *app
-    command: ["bin/rails", "runner", 'Rails.logger.info({component: "ingester", event: "ingest.stub", rails_env: Rails.env, db: ActiveRecord::Base.connection.select_value("SELECT 1") && "connected", msg: "one-shot ingestion arrives in Phase 1"})']
+    command: ["bin/rails", "runner", "IngestRunner.new.run(once: true)"]
     depends_on:
       migrate:
         condition: service_completed_successfully

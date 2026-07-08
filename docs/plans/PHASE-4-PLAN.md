@@ -21,7 +21,8 @@
   - `enrich.success` / `enrich.cache_hit` / `enrich.parked` / `enrich.retry` / `enrich.terminal` — with `kind`, `github_id`, `reason`, `attempt`
   - `ingest.malformed` — `github_event_id`, `reason`
   - `security.url_rejected` — `host`
-- [ ] Failure-path audit (checklist every external touchpoint): network timeout, DNS failure, 403/429, 404, 5xx, invalid JSON body, Postgres unavailable at boot → each path either retries with backoff, parks, or skips-and-logs. **No path exits nonzero on a transient error.**
+- [ ] Failure-path audit (checklist every external touchpoint): network timeout, DNS failure, 403/429, 404, 5xx, invalid JSON body, Postgres unavailable at boot → each path either retries with backoff, parks, or skips-and-logs. **No path exits nonzero on a transient error.** (Applies to the continuous service; one-shot mode deliberately exits nonzero on any non-`:ok`/`:not_modified` poll — D-016.)
+- [ ] Distinguish persistent from transient failures in `IngestRunner`'s continuous-mode catch-all (from the Phase 1 review): a dead DB or programming error currently backs off silently forever, and because the container never exits, compose's `restart: unless-stopped` can never fire. Define an escalation policy (e.g. exit after N consecutive identical failures, or a health signal an operator can alert on) and a replacement for the Phase 0 boot-time `SELECT 1` fail-fast that the runner's catch-all absorbed.
 - [ ] Boot resilience: ingester/worker wait-and-retry for db readiness (compose healthcheck + in-app retry)
 - [ ] Graceful shutdown: SIGTERM finishes the in-flight event/job before exit (docker compose down leaves consistent state)
 - [ ] README "**How to verify it's working**" section:
