@@ -50,11 +50,12 @@ services:
       db:
         condition: service_healthy
 
-  # Phase 0 stub: proves boot, logging, and service wiring. Replaced by the
-  # real poll loop in Phase 1.
+  # Phase 0 stub: proves boot, logging, and service wiring — the boot.ok line
+  # is evidence of env + live Postgres connectivity (a failed SELECT crashes
+  # the service instead of logging). Replaced by the real poll loop in Phase 1.
   ingester:
     <<: *app
-    command: ["bin/rails", "runner", 'loop { Rails.logger.info({component: "ingester", event: "heartbeat.stub", msg: "poll loop arrives in Phase 1"}); sleep 30 }']
+    command: ["bin/rails", "runner", 'Rails.logger.info({component: "ingester", event: "boot.ok", rails_env: Rails.env, db: ActiveRecord::Base.connection.select_value("SELECT 1") && "connected"}); loop { Rails.logger.info({component: "ingester", event: "heartbeat.stub", msg: "poll loop arrives in Phase 1"}); sleep 30 }']
     depends_on:
       migrate:
         condition: service_completed_successfully
@@ -63,7 +64,7 @@ services:
   # Phase 0 stub: Solid Queue and enrichment jobs arrive in Phase 3.
   worker:
     <<: *app
-    command: ["bin/rails", "runner", 'Rails.logger.info({component: "worker", event: "worker.stub", msg: "Solid Queue arrives in Phase 3"}); sleep']
+    command: ["bin/rails", "runner", 'Rails.logger.info({component: "worker", event: "boot.ok", rails_env: Rails.env, db: ActiveRecord::Base.connection.select_value("SELECT 1") && "connected", msg: "Solid Queue arrives in Phase 3"}); sleep']
     depends_on:
       migrate:
         condition: service_completed_successfully
@@ -72,7 +73,7 @@ services:
   # One-shot ingestion (docker compose run --rm ingest). Stub until Phase 1.
   ingest:
     <<: *app
-    command: ["bin/rails", "runner", 'Rails.logger.info({component: "ingester", event: "ingest.stub", msg: "one-shot ingestion arrives in Phase 1"})']
+    command: ["bin/rails", "runner", 'Rails.logger.info({component: "ingester", event: "ingest.stub", rails_env: Rails.env, db: ActiveRecord::Base.connection.select_value("SELECT 1") && "connected", msg: "one-shot ingestion arrives in Phase 1"})']
     depends_on:
       migrate:
         condition: service_completed_successfully
