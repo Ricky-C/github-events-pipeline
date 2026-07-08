@@ -1,0 +1,18 @@
+# Connection details (host, user, password) come from DATABASE_URL, which
+# Rails merges on top of these sections. Compose provides working defaults;
+# no real credentials exist in this project (docs/THREAT-MODEL.md threat 6).
+#
+# There is no production section: containers run RAILS_ENV=development by
+# design (docs/DECISIONS.md D-010).
+default: &default
+  adapter: postgresql
+  encoding: unicode
+  max_connections: <%= ENV.fetch("RAILS_MAX_THREADS") { 5 } %>
+
+development:
+  <<: *default
+  database: github_events_pipeline_development
+
+test:
+  <<: *default
+  database: github_events_pipeline_test
