@@ -87,6 +87,15 @@ RSpec.describe GithubClient, "#fetch_resource" do
       expect(a_request(:get, renamed_url)).to have_been_made
     end
 
+    it "resolves a relative Location against the request URI and follows it" do
+      stub_request(:get, user_url).to_return(GithubApiStubs.redirect_301(to: "/users/octocat-renamed"))
+      stub_request(:get, renamed_url).to_return(status: 200, headers: rate_headers, body: user_body)
+
+      result = client.fetch_resource(user_url)
+      expect(result).to be_ok
+      expect(a_request(:get, renamed_url)).to have_been_made
+    end
+
     it "maps a second consecutive 301 to :transient_error" do
       stub_request(:get, user_url).to_return(GithubApiStubs.redirect_301(to: renamed_url))
       stub_request(:get, renamed_url)

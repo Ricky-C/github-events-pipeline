@@ -82,10 +82,21 @@ class GithubClient
       # through the same guard as the original URL — a redirect is
       # attacker-influenceable data like any other payload field.
       location = response["location"]
-      return Result.new(status: :transient_error, error: "redirect #{status} without location") unless location
+      if location.nil? || location.empty?
+        return Result.new(status: :transient_error, error: "redirect #{status} without location")
+      end
       return Result.new(status: :transient_error, error: "redirect limit exceeded") if redirects >= MAX_REDIRECTS
 
-      verdict, checked = UrlGuard.check(location)
+      # RFC 7231 permits a relative Location; resolve it against the request
+      # URI before guarding so a same-origin relative redirect isn't misread
+      # as a scheme change. An absolute Location wins the join unchanged.
+      begin
+        resolved = URI.join(uri, location)
+      rescue URI::Error, ArgumentError
+        return Result.new(status: :transient_error, error: "unresolvable redirect location")
+      end
+
+      verdict, checked = UrlGuard.check(resolved)
       return Result.new(status: :rejected_url, error: "redirect target refused: #{checked}") if verdict == :rejected
 
       redirects += 1

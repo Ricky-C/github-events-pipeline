@@ -84,7 +84,7 @@ Refuse — returning `:rejected_url` *without making any request* — unless **a
 
 ### Redirect policy
 
-GitHub returns `301` for renamed repos/users. Follow **at most one** redirect, and only if the `Location` passes the same URL guard. A second redirect, or a guarded-out target → `:transient_error` (redirect loop) / `:rejected_url` (bad target). The redirect hop consumes budget like any request — count it.
+GitHub returns `301` for renamed repos/users. Follow **at most one** redirect, and only if the `Location` passes the same URL guard. The `Location` is first resolved against the request URI (RFC 7231 permits relative forms; an absolute `Location` wins the join), so a same-origin relative redirect is followed rather than misread as a scheme change. A second redirect, or a guarded-out target → `:transient_error` (redirect loop) / `:rejected_url` (bad target); a missing, blank, or unresolvable `Location` → `:transient_error`. The redirect hop consumes budget like any request — count it.
 
 ## Rate-State Bookkeeping
 
@@ -160,6 +160,7 @@ when :transient_error -> raise for Solid Queue retry (backoff, capped)
 - [ ] 5xx / timeout / bad JSON / oversized body → `:transient_error` (four separate specs)
 - [ ] URL guard allow/deny table: `https://api.github.com/users/x` ✓; `http://api.github.com/...` ✗; `https://api.github.com.evil.com/...` ✗; `https://evil.com/...` ✗; `https://api.github.com:8443/...` ✗; `https://user@api.github.com/...` ✗; IP literal ✗ — all deny cases make **zero** HTTP requests
 - [ ] 301 followed once when target passes guard; second 301 → `:transient_error`; guarded-out target → `:rejected_url`
+- [ ] Relative 301 `Location` resolved against the request URI and followed
 - [ ] `budget.unknown?` true before any response; false after
 - [ ] Weak ETag (`W/"abc"`) from 200 is sent back byte-identical in `If-None-Match` (no prefix stripping)
 - [ ] `spendable?(reserve: 5)` boundary: remaining 6 → true, 5 → false
