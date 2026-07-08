@@ -80,6 +80,14 @@ RSpec.describe IngestRunner do
       expect(cycle_logs.last[:sleep_for]).to eq(90)
     end
 
+    it "prefers retry-after over the primary reset when a response carries both" do
+      # Secondary/abuse limits ask for a short wait while the same response
+      # still reports the primary bucket's far-off reset.
+      run_loop([ result(:rate_limited, retry_after: 60,
+                        rate: { remaining: 55, reset_at: now + 3000 }) ])
+      expect(cycle_logs.last[:sleep_for]).to eq(60)
+    end
+
     it "waits at least a second when reset_at is already in the past" do
       run_loop([ result(:rate_limited, rate: { remaining: 0, reset_at: now - 30 }) ])
       expect(cycle_logs.last[:sleep_for]).to eq(1)

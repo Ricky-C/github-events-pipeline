@@ -127,6 +127,20 @@ RSpec.describe GithubClient, "#poll_events" do
       expect(result).to be_rate_limited
       expect(result.retry_after).to eq(90)
     end
+
+    it "normalizes an HTTP-date Retry-After into integer seconds" do
+      freeze_time do
+        stub_request(:get, events_url).to_return(
+          status: 429,
+          headers: { "retry-after" => 90.seconds.from_now.utc.httpdate },
+          body: '{"message":"You have exceeded a secondary rate limit."}'
+        )
+
+        result = client.poll_events
+        expect(result).to be_rate_limited
+        expect(result.retry_after).to eq(90)
+      end
+    end
   end
 
   describe "transient errors" do

@@ -45,7 +45,7 @@ Immutable value object. Exactly one `status` per call:
 | `:transient_error` | 5xx, timeout, connection/DNS failure, unparseable body, body over size cap | `error` (class + message), `rate`? |
 | `:rejected_url` | `fetch_resource` refused the URL pre-flight (no request made) | `error` (reason) |
 
-`poll_interval` only on `/events` responses. `rate` = `{remaining: Integer?, reset_at: Time?}` — nil-able before first response.
+`poll_interval` only on `/events` responses. `rate` = `{remaining: Integer?, reset_at: Time?}` — nil-able before first response. `retry_after` = integer seconds, normalized from both the delta-seconds and HTTP-date forms of the header; callers must prefer it over `reset_at` when both are present (secondary limits ask for a short wait while the primary reset sits far out).
 
 Convenience predicates: `ok?`, `not_modified?`, `rate_limited?`, `terminal?` (`:not_found` or `:rejected_url`), `retryable?` (`:transient_error`).
 
@@ -128,7 +128,7 @@ loop:
   case r.status
   when :ok           -> ingest(r.body); sleep max(r.poll_interval, floor)
   when :not_modified -> sleep max(r.poll_interval_or_last_known, floor)
-  when :rate_limited -> sleep (r.rate.reset_at - now) + jitter
+  when :rate_limited -> sleep (r.retry_after || (r.rate.reset_at - now)) + jitter   # retry-after wins when present
   when :transient_error -> sleep backoff(attempt++)   # capped; never exit
 ```
 
@@ -139,7 +139,7 @@ r = client.fetch_resource(record.url, etag: record.etag)
 case r.status
 when :ok            -> persist enrichment
 when :not_modified  -> touch fetched_at
-when :rate_limited  -> park(until: (r.rate.reset_at || now + 60) + jitter)
+when :rate_limited  -> park(until: (r.retry_after ? now + r.retry_after : (r.rate.reset_at || now + 60)) + jitter)  # retry_after is a duration; reset_at an instant
 when :not_found     -> mark not_found (terminal)
 when :rejected_url  -> mark rejected + security log (terminal)
 when :transient_error -> raise for Solid Queue retry (backoff, capped)
@@ -154,6 +154,7 @@ when :transient_error -> raise for Solid Queue retry (backoff, capped)
 - [ ] 200 updates persisted `remaining`/`reset_at`; visible via `budget`
 - [ ] 403 with remaining=0 → `:rate_limited` with correct `reset_at`
 - [ ] 429 with `retry-after` → `:rate_limited`, `retry_after` exposed
+- [ ] `Retry-After` in HTTP-date form → normalized to integer seconds
 - [ ] 404 → `:not_found`
 - [ ] 5xx / timeout / bad JSON / oversized body → `:transient_error` (four separate specs)
 - [ ] URL guard allow/deny table: `https://api.github.com/users/x` ✓; `http://api.github.com/...` ✗; `https://api.github.com.evil.com/...` ✗; `https://evil.com/...` ✗; `https://api.github.com:8443/...` ✗; `https://user@api.github.com/...` ✗; IP literal ✗ — all deny cases make **zero** HTTP requests

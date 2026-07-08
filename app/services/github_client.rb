@@ -157,7 +157,7 @@ class GithubClient
     when 403, 429
       # All 403s map to :rate_limited — primary-limit exhaustion and
       # secondary/abuse detection both mean "stop asking until told".
-      Result.new(status: :rate_limited, rate: rate, retry_after: int_header(response, "retry-after"))
+      Result.new(status: :rate_limited, rate: rate, retry_after: retry_after_from(response))
     when 404, 410
       Result.new(status: :not_found, rate: rate)
     when 401
@@ -182,5 +182,23 @@ class GithubClient
   def int_header(response, name)
     value = response[name]
     value && Integer(value, exception: false)
+  end
+
+  # GitHub sends Retry-After as delta-seconds, but RFC 7231 also permits the
+  # HTTP-date form (a proxy or CDN edge may rewrite it) — normalize both to
+  # integer seconds so the caller's sleep math never sees a date.
+  def retry_after_from(response)
+    value = response["retry-after"]
+    return nil unless value
+
+    seconds = Integer(value, 10, exception: false)
+    return seconds if seconds
+
+    date = begin
+      Time.httpdate(value)
+    rescue ArgumentError
+      nil
+    end
+    date && [ (date - Time.current).ceil, 0 ].max
   end
 end

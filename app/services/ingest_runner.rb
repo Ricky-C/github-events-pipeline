@@ -99,7 +99,11 @@ class IngestRunner
 
   def until_reset(result)
     reset_at = result.rate&.fetch(:reset_at, nil)
-    base = reset_at ? (reset_at - @clock.now).ceil : (result.retry_after || DEFAULT_POLL_INTERVAL)
+    # Retry-After wins when present: a secondary/abuse limit asks for a short
+    # wait while the same response still carries the primary bucket's far-off
+    # reset — sleeping to the reset would park the loop for the wrong reason
+    # (spec § HTTP → Result Mapping: "honor retry-after if present").
+    base = result.retry_after || (reset_at ? (reset_at - @clock.now).ceil : DEFAULT_POLL_INTERVAL)
     # A reset_at already in the past must not become a zero-sleep hot loop
     # against a limited API — always wait at least a second.
     [ base, 1 ].max + @jitter.call
