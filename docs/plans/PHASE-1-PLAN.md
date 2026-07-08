@@ -8,11 +8,11 @@
 
 ## Acceptance Criteria (from exercise, verbatim)
 
-- [ ] Events are ingested from the GitHub Public Events API or deterministic equivalent
-- [ ] Only PushEvent items are processed
-- [ ] Each event is persisted durably
-- [ ] Events can be uniquely identified and inspected later
-- [ ] Ingestion is repeatable or continuous
+- [x] Events are ingested from the GitHub Public Events API or deterministic equivalent
+- [x] Only PushEvent items are processed
+- [x] Each event is persisted durably
+- [x] Events can be uniquely identified and inspected later
+- [x] Ingestion is repeatable or continuous
 
 ## Tasks
 
@@ -30,11 +30,13 @@
 
 ## Exit Criteria
 
-- [ ] `docker compose run --rm ingest` (one-shot) populates `raw_events`; rows inspectable via console/psql
-- [ ] Running it twice produces zero duplicate rows (unique index proof)
-- [ ] Continuous mode visibly honors `X-Poll-Interval` in logs
-- [ ] Killing and restarting the ingester loses nothing and re-ingests nothing
-- [ ] Full contract test checklist from `docs/specs/GITHUB-CLIENT.md` green (WebMock fixtures)
+All executed live on 2026-07-08 (observed output in PR #8):
+
+- [x] `docker compose run --rm ingest` (one-shot) populates `raw_events`; rows inspectable via console/psql — 30 seen, 28 new PushEvents; payload/etag/rate state inspected via runner console
+- [x] Running it twice produces zero duplicate rows (unique index proof) — live re-ingest of 10 persisted payloads: `push_events_new: 0, duplicates_skipped: 10`; `GROUP BY github_event_id HAVING COUNT(*) > 1` → 0 rows over 188 events
+- [x] Continuous mode visibly honors `X-Poll-Interval` in logs — three cycles at 17:52:48/17:53:49/17:54:49, `sleep_for: 60` matching the header
+- [x] Killing and restarting the ingester loses nothing and re-ingests nothing — SIGTERM → `shutdown.clean`, exit 0; restart resumed polling, row count monotonic (135 → 188), duplicate SQL still 0
+- [x] Full contract test checklist from `docs/specs/GITHUB-CLIENT.md` green (WebMock fixtures) — 77 examples, 0 failures; RuboCop/Brakeman/bundler-audit clean
 
 ## Out of Scope
 
