@@ -167,6 +167,16 @@ RSpec.describe GithubClient, "#poll_events" do
       expect(result.error).to include("unparseable")
     end
 
+    it "does not advance the stored ETag past a 200 whose body failed to parse" do
+      RateLimitState.record!(etag: 'W/"old"')
+      stub_request(:get, events_url)
+        .to_return(status: 200, headers: { "etag" => 'W/"new"' }, body: '{"truncated":')
+
+      result = client.poll_events
+      expect(result).to be_retryable
+      expect(RateLimitState.current.etag).to eq('W/"old"')
+    end
+
     it "maps a body over the 5 MB cap to :transient_error" do
       stub_request(:get, events_url)
         .to_return(status: 200, body: "a" * (GithubClient::MAX_BODY_BYTES + 1))

@@ -91,7 +91,7 @@ GitHub returns `301` for renamed repos/users. Follow **at most one** redirect, a
 After **every** real (non-304-shortcut… i.e., every actual HTTP) response, including errors, when headers are present:
 
 - persist `x-ratelimit-remaining` → `remaining`, `x-ratelimit-reset` (epoch) → `reset_at`, now → `updated_at`
-- `/events` responses: persist `etag` and `x-poll-interval`
+- `/events` responses: persist `x-poll-interval`; persist `etag` **only from a 200 whose body parsed** — an unparseable 200 must not advance the stored ETag past a page that was never ingested (the next conditional poll would 304 against content we never landed)
 - **ETags are stored and echoed verbatim** — GitHub returns weak ETags (`W/"..."`); stripping the `W/` prefix means it never matches, every poll silently costs budget, and the core design is defeated invisibly
 - **304s may not be free in practice** — despite GitHub's documentation, a live 304 was observed carrying a decremented `x-ratelimit-remaining` (D-017). The mirror records whatever headers say; no code may assume 304s cost nothing
 - `fetch_resource` with `etag:` given → on `304`, return `:not_modified` (caller keeps existing record; refresh `fetched_at` only)
@@ -149,6 +149,7 @@ when :transient_error -> raise for Solid Queue retry (backoff, capped)
 
 - [ ] Sends UA / Accept / API-version headers on every request
 - [ ] `/events`: stores ETag from 200; sends it as `If-None-Match` on next poll
+- [ ] 200 with an ETag but an unparseable body → `:transient_error`, stored ETag not advanced
 - [ ] 304 → `:not_modified`; a header-less 304 leaves persisted `remaining` unchanged, while rate headers a 304 does carry are mirrored (observed live: 304s can arrive with a decremented remaining — docs/DECISIONS.md D-017)
 - [ ] Parses and exposes `x-poll-interval`
 - [ ] 200 updates persisted `remaining`/`reset_at`; visible via `budget`

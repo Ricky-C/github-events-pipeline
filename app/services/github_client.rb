@@ -70,7 +70,12 @@ class GithubClient
       status = response.code.to_i
 
       unless redirect?(status)
-        return map(status, response, body, events: events)
+        result = map(status, response, body, events: events)
+        # The stored ETag advances only past a page that actually parsed —
+        # persisted any earlier, the next conditional poll would 304 against
+        # content that was never ingested and silently skip those events.
+        @state.record!(etag: response["etag"]) if events && result.ok? && response["etag"]
+        return result
       end
 
       # GitHub 301s renamed users/repos. Follow at most one hop, and only
@@ -127,26 +132,18 @@ class GithubClient
   # Mirror rate headers after every real HTTP response, including errors
   # and redirect hops. Partial upsert: only observed columns are written,
   # so header-less responses persist nothing and resource fetches never
-  # clobber the /events etag/poll_interval.
+  # clobber the /events etag/poll_interval. The ETag itself is persisted
+  # in perform, and only once the body has parsed.
   def persist(response, events:)
-    attrs = {}
-    if (remaining = int_header(response, "x-ratelimit-remaining"))
-      attrs[:remaining] = remaining
-    end
-    if (reset = int_header(response, "x-ratelimit-reset"))
-      attrs[:reset_at] = Time.at(reset).utc
-    end
-    if events
-      if (interval = int_header(response, "x-poll-interval"))
-        attrs[:poll_interval] = interval
-      end
-      attrs[:etag] = response["etag"] if response["etag"]
+    attrs = read_rate(response).compact
+    if events && (interval = int_header(response, "x-poll-interval"))
+      attrs[:poll_interval] = interval
     end
     @state.record!(attrs) unless attrs.empty?
   end
 
   def map(status, response, body, events:)
-    rate = rate_from(response)
+    rate = read_rate(response)
     case status
     when 200..299
       Result.new(status: :ok, body: JSON.parse(body), etag: response["etag"],
@@ -173,7 +170,10 @@ class GithubClient
     Result.new(status: :transient_error, error: "unparseable body: #{e.class}", rate: rate)
   end
 
-  def rate_from(response)
+  # One reader for the rate headers so the persisted mirror and Result#rate
+  # can never disagree about the same response. Values stay nil-able here
+  # (the Result contract exposes unknowns); persist compacts its copy.
+  def read_rate(response)
     reset = int_header(response, "x-ratelimit-reset")
     { remaining: int_header(response, "x-ratelimit-remaining"),
       reset_at: reset && Time.at(reset).utc }
