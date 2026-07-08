@@ -78,6 +78,36 @@ Format: **Context → Decision → Consequences (incl. what we gave up)**
 **Decision:** Pass `PGHOST`/`PGUSER`/`PGPASSWORD` discretely; `config/database.yml` reads them explicitly and owns the env→database mapping.
 **Consequences:** Passwords never travel through URL parsing (any characters work); `RAILS_ENV` is the single switch between dev and test databases; compose and CI share the same mechanism. Cost: no single copy-pasteable connection URL — acceptable, nothing external consumes one. The related caveat that the postgres image bakes the password into the volume at first initdb is now documented in compose and `.env.example`.
 
+## D-013: Net::HTTP over an HTTP-client gem
+
+**Context:** Phase 1 needs an HTTP transport for `GithubClient`. Faraday/HTTParty are the habitual choices.
+**Decision:** Stdlib `Net::HTTP`, wrapped entirely inside the one client class.
+**Consequences:** Zero new supply-chain surface (docs/THREAT-MODEL.md), no middleware indirection for a client that talks to exactly one host with strict transport limits, and WebMock intercepts it natively. The 5 MB cap is enforced by streaming `read_body` and aborting mid-read. Gave up: nicer ergonomics if the API surface ever grows — acceptable, the spec forbids it growing.
+
+## D-014: rate_limit_states singleton via guard column + partial upsert
+
+**Context:** The shared budget mirror must be one logical row, written by two processes, where every write may be a retry.
+**Decision:** A `singleton_guard` column fixed at 0 with a unique index; all writes are single-statement `upsert` (`ON CONFLICT DO UPDATE`) of only the columns observed in that response.
+**Consequences:** The singleton is a database constraint, not a convention; there is no read-modify-write to race; concurrent writers are last-write-wins, which the client spec explicitly accepts (D-006 lineage) because headers self-correct on the next real response. Partial updates mean a resource fetch can never clobber the `/events` ETag, and a header-less response persists nothing.
+
+## D-015: Fixture strategy — capture the happy paths once, synthesize the failures
+
+**Context:** Tests must never touch the live API (Golden Rule 8), but realistic fixtures matter — GitHub's weak ETags (`W/"..."`) are exactly the kind of detail hand-written stubs get wrong.
+**Decision:** One live capture session: `curl -sS -i --http1.1` of a real 200 and a real 304 (ETag replay inside GitHub's cache window), committed verbatim as `.http` files and parsed by a small spec helper (chunked-encoding headers stripped at load — raw replay of chunked captures breaks WebMock). Error responses (403/429/404/5xx/malformed/oversized) are synthesized in spec helpers, since capturing them live would mean burning the budget to zero on purpose.
+**Consequences:** Contract specs assert against real GitHub bytes (the weak-ETag echo test uses the actual captured ETag); the capture cost 1 budget request total. The 304 capture also produced D-017's observation.
+
+## D-016: One-shot ingestion via runner argument in the compose command
+
+**Context:** The `ingest` service needs one-shot mode; the phase plan allowed an env flag or an argument.
+**Decision:** `IngestRunner.new.run(once: true)` spelled out in the compose `command:`.
+**Consequences:** The mode is visible exactly where the service is defined — no hidden env coupling between compose and app code. One-shot mode also skips signal traps and lets exceptions propagate, so verification runs fail loudly instead of backing off silently.
+
+## D-017: Observed — a real 304 arrived with a decremented X-RateLimit-Remaining
+
+**Context:** The architecture leans on GitHub's documented behavior that conditional requests answered 304 don't count against the rate limit. During the Phase 1 fixture capture, the 200 returned `remaining: 59` and the immediate 304 replay returned `remaining: 58` — the conditional request appears to have been counted (single observation; could also be another client sharing the egress IP in that second).
+**Decision:** Build to headers-as-source-of-truth rather than to documentation: the client mirrors whatever rate headers each response carries (including 304s), and the contract-test checklist line was adjusted from "304 → remaining unchanged" to "header-less 304 → unchanged; 304 rate headers → mirrored". Verify the trajectory across several 304s during end-of-phase verification runs.
+**Consequences:** The persisted budget is correct either way — no code depends on 304s being free. If the observation holds, the *design margin* changes: polling at the 60s `X-Poll-Interval` would consume the entire 60/hr budget, leaving nothing for Phase 3 enrichment. Mitigation would be policy, not architecture (stretch the effective poll interval; the cadence already lives in one place, `IngestRunner`). Flagged for re-measurement before Phase 3 sets `ENRICHMENT_RESERVE` policy.
+
 ---
 
 _Append new entries below as D-00N during each phase._
