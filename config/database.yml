@@ -1,0 +1,22 @@
+# Connection details come from discrete libpq-style env vars rather than a
+# DATABASE_URL, so passwords never travel through URL parsing and RAILS_ENV
+# alone selects the database (docs/DECISIONS.md D-012). Compose provides
+# working defaults; no real credentials exist (docs/THREAT-MODEL.md threat 6).
+#
+# There is no production section: containers run RAILS_ENV=development by
+# design (docs/DECISIONS.md D-010).
+default: &default
+  adapter: postgresql
+  encoding: unicode
+  max_connections: <%= ENV.fetch("RAILS_MAX_THREADS") { 5 } %>
+  host: <%= ENV.fetch("PGHOST") { "localhost" } %>
+  username: <%= ENV.fetch("PGUSER") { "postgres" } %>
+  password: <%= ENV["PGPASSWORD"] %>
+
+development:
+  <<: *default
+  database: github_events_pipeline_development
+
+test:
+  <<: *default
+  database: github_events_pipeline_test

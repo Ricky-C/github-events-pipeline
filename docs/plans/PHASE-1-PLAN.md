@@ -42,4 +42,4 @@ Structured `push_events` columns (Phase 2). Enrichment (Phase 3). Final log form
 
 ## Notes / Discovered Work
 
-_(append during the phase)_
+- ~~From Phase 0 security review: harden `JsonLogFormatter`.~~ **Done in Phase 0** during code-review remediation: reserved `ts`/`level` keys now win over hash-message keys, all string values (including hash keys/values, recursively) are scrubbed to valid UTF-8 so `JSON.generate` can't raise mid-loop, and exceptions log via `msg2str` (class + backtrace). Spec matrix covers newline injection, reserved-key collision, duplicate string keys, invalid UTF-8 (string and nested hash), and exceptions.

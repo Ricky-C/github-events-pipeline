@@ -66,6 +66,18 @@ Format: **Context → Decision → Consequences (incl. what we gave up)**
 **Decision:** Run development env for zero-secret boot, but configure explicitly what env defaults would get wrong: `queue_adapter = :solid_queue`, Solid Queue on the **primary** database, log level info with JSON-only formatting.
 **Consequences:** Clean-checkout boot with no key generation steps; queue durability = database durability (one system of record, per the exercise); no async-adapter false positives during development. Cost: dev-env defaults must be consciously overridden — captured as explicit Phase 0/3 tasks so it can't be forgotten.
 
+## D-011: No HTTP server, no credentials, no production environment
+
+**Context:** `rails new` ships puma, encrypted credentials + master.key, and a production env config. This service has zero inbound surface (docs/THREAT-MODEL.md) and zero secrets by design; containers run the development env (D-010).
+**Decision:** Delete all three at scaffold time: no puma/`config/puma.rb`, no `credentials.yml.enc`/`master.key`, no `config/environments/production.rb` or database.yml production section. Unused railties (mailer, mailbox, text, storage, cable) also removed. Review cleanup extended the trim: `config.ru`, the `/up` route, the CORS/inflections/locale scaffold files, the no-op `bin/docker-entrypoint`, and stale storage/credentials ignore rules are gone too (key-file ignore rules kept as defense-in-depth).
+**Consequences:** The repo contains nothing that can leak and nothing listening; the "no secrets" claim is verifiable by absence, not policy. Cost: a future inbound surface (health endpoint, metrics) would need puma reintroduced — one Gemfile line, recorded here so it reads as a decision, not an accident.
+
+## D-012: Discrete PG* connection vars instead of DATABASE_URL
+
+**Context:** Phase 0 code review found two failure modes in composing a `DATABASE_URL` from `${POSTGRES_PASSWORD}`: reserved characters in an overridden password break URI parsing (while the db itself accepts the password), and the database name was pinned in the URL so `RAILS_ENV` alone didn't select the database.
+**Decision:** Pass `PGHOST`/`PGUSER`/`PGPASSWORD` discretely; `config/database.yml` reads them explicitly and owns the env→database mapping.
+**Consequences:** Passwords never travel through URL parsing (any characters work); `RAILS_ENV` is the single switch between dev and test databases; compose and CI share the same mechanism. Cost: no single copy-pasteable connection URL — acceptable, nothing external consumes one. The related caveat that the postgres image bakes the password into the volume at first initdb is now documented in compose and `.env.example`.
+
 ---
 
 _Append new entries below as D-00N during each phase._

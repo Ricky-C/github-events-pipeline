@@ -1,0 +1,44 @@
+# See https://docs.docker.com/engine/reference/builder/#dockerignore-file for more about ignoring files.
+
+# Ignore git directory.
+/.git/
+/.gitignore
+
+# Ignore bundler config.
+/.bundle
+
+# Ignore all environment files.
+/.env*
+
+# No credentials exist by design (docs/DECISIONS.md D-011); this guard keeps
+# a stray key file out of the image.
+/config/master.key
+/config/credentials/*.key
+
+# Ignore all logfiles and tempfiles.
+/log/*
+/tmp/*
+!/log/.keep
+!/tmp/.keep
+
+# Ignore pidfiles, but keep the directory.
+/tmp/pids/*
+!/tmp/pids/.keep
+
+# Ignore CI service files.
+/.github
+
+# Docs never affect the runtime image; excluding them keeps docs-only
+# changes (required in every PR) from invalidating the COPY layer.
+/docs
+/README.md
+/CLAUDE.md
+/DESIGN.md
+/.claude
+
+# Ignore development files
+/.devcontainer
+
+# Ignore Docker-related files
+/.dockerignore
+/Dockerfile*
