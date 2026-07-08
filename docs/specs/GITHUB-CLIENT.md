@@ -158,6 +158,8 @@ when :transient_error -> raise for Solid Queue retry (backoff, capped)
 - [ ] `Retry-After` in HTTP-date form → normalized to integer seconds
 - [ ] 404 → `:not_found`
 - [ ] 5xx / timeout / bad JSON / oversized body → `:transient_error` (four separate specs)
+- [ ] Oversized body still mirrors the response's rate headers
+- [ ] Numeric headers parse as base 10 (a leading zero is not octal)
 - [ ] URL guard allow/deny table: `https://api.github.com/users/x` ✓; `http://api.github.com/...` ✗; `https://api.github.com.evil.com/...` ✗; `https://evil.com/...` ✗; `https://api.github.com:8443/...` ✗; `https://user@api.github.com/...` ✗; IP literal ✗ — all deny cases make **zero** HTTP requests
 - [ ] 301 followed once when target passes guard; second 301 → `:transient_error`; guarded-out target → `:rejected_url`
 - [ ] Relative 301 `Location` resolved against the request URI and followed

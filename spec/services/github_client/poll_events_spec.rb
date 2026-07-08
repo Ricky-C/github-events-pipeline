@@ -67,6 +67,13 @@ RSpec.describe GithubClient, "#poll_events" do
     expect(RateLimitState.current.poll_interval).to eq(fixture_interval)
   end
 
+  it "parses numeric headers as base 10 even with a leading zero" do
+    stub_request(:get, events_url)
+      .to_return(status: 200, headers: { "x-poll-interval" => "010" }, body: "[]")
+
+    expect(client.poll_events.poll_interval).to eq(10)
+  end
+
   it "updates persisted remaining/reset_at from a 200, visible via #budget" do
     stub_request(:get, events_url).to_return(GithubFixtures.response(:events_200))
 
@@ -184,6 +191,18 @@ RSpec.describe GithubClient, "#poll_events" do
       result = client.poll_events
       expect(result).to be_retryable
       expect(result.error).to include("over")
+    end
+
+    it "still mirrors rate headers from a response whose body blew the cap" do
+      stub_request(:get, events_url).to_return(
+        status: 200,
+        headers: { "x-ratelimit-remaining" => "3", "x-ratelimit-reset" => "1783600000" },
+        body: "a" * (GithubClient::MAX_BODY_BYTES + 1)
+      )
+
+      result = client.poll_events
+      expect(result).to be_retryable
+      expect(RateLimitState.current.remaining).to eq(3)
     end
 
     it "maps a connection failure to :transient_error" do

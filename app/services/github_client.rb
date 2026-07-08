@@ -28,8 +28,17 @@ class GithubClient
   ].freeze
 
   # Internal control flow only: raised mid-stream to abort an over-cap read
-  # (closing the connection), caught before the public surface.
-  class BodyTooLarge < StandardError; end
+  # (closing the connection), caught before the public surface. Carries the
+  # response so its rate headers can still be mirrored — the spec requires
+  # bookkeeping after every real response, and this one cost budget.
+  class BodyTooLarge < StandardError
+    attr_reader :response
+
+    def initialize(response)
+      @response = response
+      super("response body over cap")
+    end
+  end
   private_constant :BodyTooLarge
 
   # http: is a transport override kept for contract fidelity; specs don't
@@ -102,7 +111,8 @@ class GithubClient
       redirects += 1
       uri = checked
     end
-  rescue BodyTooLarge
+  rescue BodyTooLarge => e
+    persist(e.response, events: events) if e.response
     Result.new(status: :transient_error, error: "response body over #{MAX_BODY_BYTES} bytes")
   rescue *NETWORK_ERRORS => e
     Result.new(status: :transient_error, error: "#{e.class}: #{e.message}")
@@ -128,14 +138,14 @@ class GithubClient
   end
 
   def read_capped(response)
-    raise BodyTooLarge if response.content_length.to_i > MAX_BODY_BYTES
+    raise BodyTooLarge.new(response) if response.content_length.to_i > MAX_BODY_BYTES
 
     body = +""
     response.read_body do |chunk|
       body << chunk
       # Content-Length can lie or be absent (chunked); the stream check is
       # the real cap. Raising aborts the read and closes the connection.
-      raise BodyTooLarge if body.bytesize > MAX_BODY_BYTES
+      raise BodyTooLarge.new(response) if body.bytesize > MAX_BODY_BYTES
     end
     body
   end
@@ -192,7 +202,9 @@ class GithubClient
 
   def int_header(response, name)
     value = response[name]
-    value && Integer(value, exception: false)
+    # Base 10 always: Integer's radix auto-detection would read a
+    # leading-zero header as octal ("010" -> 8) or reject it ("09" -> nil).
+    value && Integer(value, 10, exception: false)
   end
 
   # GitHub sends Retry-After as delta-seconds, but RFC 7231 also permits the
