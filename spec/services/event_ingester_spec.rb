@@ -98,6 +98,56 @@ RSpec.describe EventIngester do
     end
   end
 
+  describe "rows PostgreSQL refuses (jsonb cannot store NUL)" do
+    let(:pushes) do
+      GithubFixtures.json_body(:events_200).select { |event| event["type"] == "PushEvent" }.first(3)
+    end
+    let(:poisoned) do
+      pushes[1].deep_dup.tap { |event| event["payload"]["ref"] = "refs/heads/nul\u0000branch" }
+    end
+
+    it "falls back to per-row inserts, scrubs the refused row, and keeps the batch" do
+      counts = ingester.ingest([ pushes[0], poisoned, pushes[2] ])
+
+      expect(counts).to eq(
+        events_seen: 3,
+        push_events_new: 3,
+        duplicates_skipped: 0,
+        malformed_skipped: 0
+      )
+      row = RawEvent.find_by!(github_event_id: poisoned["id"])
+      expect(row.payload["payload_scrubbed"]).to be(true)
+      expect(row.payload["payload"]["ref"]).to eq("refs/heads/nulbranch")
+      expect(logger.messages(:warn))
+        .to contain_exactly(hash_including(reason: "payload_scrubbed", detail: poisoned["id"]))
+    end
+
+    it "re-raises the batch error when every row is refused (not row-specific)" do
+      allow(RawEvent).to receive(:insert_all)
+        .and_raise(ActiveRecord::StatementInvalid.new("server closed the connection"))
+
+      expect { ingester.ingest(pushes) }.to raise_error(ActiveRecord::StatementInvalid)
+      expect(logger.messages(:warn).map { |entry| entry[:reason] })
+        .to all(eq("row_rejected"))
+    end
+
+    it "rejects an id containing NUL upfront without touching the database" do
+      bad = pushes[0].deep_dup.tap { |event| event["id"] = "123\u0000456" }
+
+      counts = ingester.ingest([ bad ])
+
+      expect(counts).to eq(
+        events_seen: 1,
+        push_events_new: 0,
+        duplicates_skipped: 0,
+        malformed_skipped: 1
+      )
+      expect(RawEvent.count).to eq(0)
+      expect(logger.messages(:warn))
+        .to contain_exactly(hash_including(reason: "invalid_event_id", detail: "123456"))
+    end
+  end
+
   it "counts an in-page repeated id as a duplicate so counts still reconcile" do
     push = GithubFixtures.json_body(:events_200).find { |event| event["type"] == "PushEvent" }
     counts = ingester.ingest([ push, push.dup ])

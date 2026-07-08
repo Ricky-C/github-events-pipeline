@@ -108,6 +108,12 @@ Format: **Context → Decision → Consequences (incl. what we gave up)**
 **Decision:** Build to headers-as-source-of-truth rather than to documentation: the client mirrors whatever rate headers each response carries (including 304s), and the contract-test checklist line was adjusted from "304 → remaining unchanged" to "header-less 304 → unchanged; 304 rate headers → mirrored". Verify the trajectory across several 304s during end-of-phase verification runs.
 **Consequences:** The persisted budget is correct either way — no code depends on 304s being free. If the observation holds, the *design margin* changes: polling at the 60s `X-Poll-Interval` would consume the entire 60/hr budget, leaving nothing for Phase 3 enrichment. Mitigation would be policy, not architecture (stretch the effective poll interval; the cadence already lives in one place, `IngestRunner`). Flagged for re-measurement before Phase 3 sets `ENRICHMENT_RESERVE` policy.
 
+## D-018: NUL-bearing payloads are scrubbed and marked, not dropped
+
+**Context:** PostgreSQL `jsonb` cannot store NUL (U+0000) anywhere in a document, so a PushEvent whose payload contains one defeats byte-perfect raw persistence — and a single such row raised out of the whole-page `insert_all`, costing every valid event on the page (Phase 1 review finding).
+**Decision:** The batch insert stays the fast path; on `StatementInvalid` the page falls back to savepointed per-row inserts, and a refused row is retried once with NUL stripped from every payload string (keys included) plus a top-level `"payload_scrubbed": true` marker and an `ingest.malformed` warn. Rows refused even after scrubbing count toward `malformed_skipped`; if *every* row is refused, the original batch error re-raises — an all-rows failure is a database problem, not a payload problem. A NUL inside the event *id* is rejected upfront as `invalid_event_id` instead: scrubbing an identifier would forge a new one.
+**Consequences:** Raw fidelity is knowingly compromised for exactly the rows PG cannot store verbatim — detectable via the marker key and the warn log, and a NUL payload could never round-trip through `jsonb` anyway (the alternative was losing the row entirely). Savepoints (`requires_new: true`) keep a refused statement from aborting any wrapping transaction, including the transactional test suite. Cost: a poisoned page pays one failed batch statement plus one statement per row.
+
 ---
 
 _Append new entries below as D-00N during each phase._
