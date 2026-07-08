@@ -30,7 +30,7 @@
 
 ## Exit Criteria
 
-All executed live on 2026-07-08 (observed output in PR #8):
+All executed live on 2026-07-08 (observed output in PR #10):
 
 - [x] `docker compose run --rm ingest` (one-shot) populates `raw_events`; rows inspectable via console/psql — 30 seen, 28 new PushEvents; payload/etag/rate state inspected via runner console
 - [x] Running it twice produces zero duplicate rows (unique index proof) — live re-ingest of 10 persisted payloads: `push_events_new: 0, duplicates_skipped: 10`; `GROUP BY github_event_id HAVING COUNT(*) > 1` → 0 rows over 188 events
