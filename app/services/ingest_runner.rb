@@ -15,6 +15,12 @@ class IngestRunner
   # comfortably inside compose's stop grace period.
   SLEEP_SLICE = 1
 
+  # One-shot mode raises this for any poll that isn't :ok/:not_modified so
+  # verification runs exit nonzero (D-016) — Results are values, not
+  # exceptions, so a failed poll would otherwise look like success to
+  # anything keying on the exit code.
+  PollFailed = Class.new(StandardError)
+
   # traps: false lets specs drive the loop without replacing the test
   # process's own TERM/INT handlers.
   def initialize(client: GithubClient.new, ingester: EventIngester.new,
@@ -39,12 +45,15 @@ class IngestRunner
       # One-shot mode lets failures propagate — a verification run should
       # be loud. Continuous mode absorbs everything and backs off instead.
       if once
-        cycle
+        _wait, result = cycle
+        unless result.ok? || result.not_modified?
+          raise PollFailed, "one-shot poll failed: #{result.status} #{result.error}".strip
+        end
         break
       end
 
       begin
-        wait = cycle
+        wait, _result = cycle
         interruptible_sleep(wait)
       rescue StandardError => e
         @logger.error(component: "ingester", event: "poll.error",
@@ -61,7 +70,7 @@ class IngestRunner
 
   private
 
-  # Runs one poll, logs the cycle, returns how long to sleep before the next.
+  # Runs one poll, logs the cycle, returns the sleep duration and the result.
   def cycle
     result = @client.poll_events
     counts = result.ok? ? @ingester.ingest(result.body) : empty_counts
@@ -73,7 +82,7 @@ class IngestRunner
       budget_remaining: @client.budget.remaining, sleep_for: wait
     }.merge(counts))
 
-    wait
+    [ wait, result ]
   end
 
   def wait_for(result)

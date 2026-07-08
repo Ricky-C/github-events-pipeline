@@ -100,7 +100,7 @@ Format: **Context → Decision → Consequences (incl. what we gave up)**
 
 **Context:** The `ingest` service needs one-shot mode; the phase plan allowed an env flag or an argument.
 **Decision:** `IngestRunner.new.run(once: true)` spelled out in the compose `command:`.
-**Consequences:** The mode is visible exactly where the service is defined — no hidden env coupling between compose and app code. One-shot mode also skips signal traps and lets exceptions propagate, so verification runs fail loudly instead of backing off silently.
+**Consequences:** The mode is visible exactly where the service is defined — no hidden env coupling between compose and app code. One-shot mode also skips signal traps and lets exceptions propagate, so verification runs fail loudly instead of backing off silently. Since the client returns failures as Result values rather than exceptions, one-shot mode also raises `IngestRunner::PollFailed` for any poll that isn't `:ok`/`:not_modified` — those two are the only zero-exit outcomes, so a rate-limited or erroring verification run deliberately exits nonzero (Phase 1 review fix).
 
 ## D-017: Observed — a real 304 arrived with a decremented X-RateLimit-Remaining
 

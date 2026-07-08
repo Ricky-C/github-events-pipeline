@@ -151,5 +151,31 @@ RSpec.describe IngestRunner do
 
       expect { runner.run(once: true) }.to raise_error("boom")
     end
+
+    it "raises PollFailed on a failure result so the process exits nonzero" do
+      allow(client).to receive(:poll_events).and_return(result(:transient_error, error: "HTTP 502"))
+      runner = described_class.new(client: client, ingester: ingester, sleeper: ->(_) { },
+                                   clock: clock, logger: logger, jitter: -> { 0 }, traps: false)
+
+      expect { runner.run(once: true) }
+        .to raise_error(IngestRunner::PollFailed, /transient_error/)
+    end
+
+    it "treats a rate-limited one-shot as a failure too" do
+      allow(client).to receive(:poll_events).and_return(result(:rate_limited, retry_after: 60))
+      runner = described_class.new(client: client, ingester: ingester, sleeper: ->(_) { },
+                                   clock: clock, logger: logger, jitter: -> { 0 }, traps: false)
+
+      expect { runner.run(once: true) }
+        .to raise_error(IngestRunner::PollFailed, /rate_limited/)
+    end
+
+    it "returns normally on :not_modified — an unchanged feed is a healthy poll" do
+      allow(client).to receive(:poll_events).and_return(result(:not_modified, poll_interval: 60))
+      runner = described_class.new(client: client, ingester: ingester, sleeper: ->(_) { },
+                                   clock: clock, logger: logger, jitter: -> { 0 }, traps: false)
+
+      expect { runner.run(once: true) }.not_to raise_error
+    end
   end
 end
