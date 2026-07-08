@@ -41,12 +41,8 @@ class GithubClient
   end
   private_constant :BodyTooLarge
 
-  # http: is a transport override kept for contract fidelity; specs don't
-  # inject it because WebMock intercepts Net::HTTP globally.
-  def initialize(state: RateLimitState, clock: Time, http: nil)
+  def initialize(state: RateLimitState)
     @state = state
-    @clock = clock
-    @http = http
   end
 
   # GET /events with the persisted ETag. A 304 costs nothing to parse and

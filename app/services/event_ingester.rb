@@ -11,6 +11,12 @@ class EventIngester
   # payload size is bounded upstream by the client's 5 MB response cap.
   MAX_EVENT_ID_LENGTH = 64
 
+  # Single owner of the counts shape — also the zero for callers whose
+  # cycle never reaches ingest (IngestRunner logs it on non-ok polls).
+  def self.empty_counts
+    { events_seen: 0, push_events_new: 0, duplicates_skipped: 0, malformed_skipped: 0 }
+  end
+
   def initialize(logger: Rails.logger)
     @logger = logger
   end
@@ -20,7 +26,7 @@ class EventIngester
   def ingest(events)
     unless events.is_a?(Array)
       warn_malformed("body_not_array", detail: events.class.name)
-      return counts(0, 0, 0, 0)
+      return self.class.empty_counts
     end
 
     rows = []

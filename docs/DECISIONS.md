@@ -114,6 +114,12 @@ Format: **Context → Decision → Consequences (incl. what we gave up)**
 **Decision:** The batch insert stays the fast path; on `StatementInvalid` the page falls back to savepointed per-row inserts, and a refused row is retried once with NUL stripped from every payload string (keys included) plus a top-level `"payload_scrubbed": true` marker and an `ingest.malformed` warn. Rows refused even after scrubbing count toward `malformed_skipped`; if *every* row is refused, the original batch error re-raises — an all-rows failure is a database problem, not a payload problem. A NUL inside the event *id* is rejected upfront as `invalid_event_id` instead: scrubbing an identifier would forge a new one.
 **Consequences:** Raw fidelity is knowingly compromised for exactly the rows PG cannot store verbatim — detectable via the marker key and the warn log, and a NUL payload could never round-trip through `jsonb` anyway (the alternative was losing the row entirely). Savepoints (`requires_new: true`) keep a refused statement from aborting any wrapping transaction, including the transactional test suite. Cost: a poisoned page pays one failed batch statement plus one statement per row.
 
+## D-019: GithubClient's clock:/http: params removed from the contract
+
+**Context:** The spec's Public Interface listed `clock:` and `http:` as injectable wiring, but the implementation never read either — WebMock intercepts Net::HTTP globally (no transport seam needed) and nothing in the client reads a clock (`Time.at` converts header epochs; `Time.current` normalizes a date-form Retry-After at parse time). A labeled-injectable parameter wired to nothing is a trap: injecting a fake clock or transport silently did nothing (Phase 1 review finding).
+**Decision:** Drop both params from the class and the spec signature rather than wire them.
+**Consequences:** The contract signature is honest — `state:` is the only seam, and it is real. If a genuine transport or clock seam is ever needed, it gets added together with its consumer, not ahead of one.
+
 ---
 
 _Append new entries below as D-00N during each phase._

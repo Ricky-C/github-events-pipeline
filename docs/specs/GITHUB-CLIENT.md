@@ -12,8 +12,10 @@ The single chokepoint for all GitHub API traffic (CLAUDE.md Golden Rule 3). This
 
 ```ruby
 class GithubClient
-  # Injectable for tests. Defaults are production wiring.
-  def initialize(state: RateLimitState, clock: Time, http: nil)
+  # Injectable for tests. Defaults are production wiring. state: is the
+  # only seam — WebMock covers transport and nothing here reads a clock
+  # (docs/DECISIONS.md D-019).
+  def initialize(state: RateLimitState)
 
   # GET https://api.github.com/events using the persisted ETag.
   # Persists new ETag + rate state from response headers.

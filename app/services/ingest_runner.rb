@@ -8,6 +8,9 @@ class IngestRunner
   POLL_FLOOR = 10
   BACKOFF_BASE = 5
   BACKOFF_CAP = 300
+  # 5 * 2**7 already exceeds the cap; clamping keeps a weeks-long outage
+  # from growing 2**@attempt into an ever-larger bignum.
+  MAX_BACKOFF_ATTEMPT = 7
   # Jitter keeps a restarted fleet (or ingester + future enrichment worker)
   # from stampeding the API at the same reset instant.
   MAX_JITTER = 10
@@ -22,15 +25,18 @@ class IngestRunner
   PollFailed = Class.new(StandardError)
 
   # traps: false lets specs drive the loop without replacing the test
-  # process's own TERM/INT handlers.
+  # process's own TERM/INT handlers. state: should match the store the
+  # client persists to — the runner reads the last poll interval from it.
   def initialize(client: GithubClient.new, ingester: EventIngester.new,
                  sleeper: Kernel.method(:sleep), clock: Time,
+                 state: RateLimitState,
                  logger: Rails.logger, jitter: -> { rand(0..MAX_JITTER) },
                  traps: true)
     @client = client
     @ingester = ingester
     @sleeper = sleeper
     @clock = clock
+    @state = state
     @logger = logger
     @jitter = jitter
     @traps = traps
@@ -73,7 +79,7 @@ class IngestRunner
   # Runs one poll, logs the cycle, returns the sleep duration and the result.
   def cycle
     result = @client.poll_events
-    counts = result.ok? ? @ingester.ingest(result.body) : empty_counts
+    counts = result.ok? ? @ingester.ingest(result.body) : EventIngester.empty_counts
     wait = wait_for(result)
 
     @logger.info({
@@ -92,7 +98,7 @@ class IngestRunner
       floored(result.poll_interval)
     when :not_modified
       @attempt = 0
-      floored(result.poll_interval || RateLimitState.current&.poll_interval)
+      floored(result.poll_interval || @state.current&.poll_interval)
     when :rate_limited
       @attempt = 0
       until_reset(result)
@@ -120,12 +126,8 @@ class IngestRunner
 
   def backoff
     wait = [ BACKOFF_BASE * (2**@attempt), BACKOFF_CAP ].min + @jitter.call
-    @attempt += 1
+    @attempt = [ @attempt + 1, MAX_BACKOFF_ATTEMPT ].min
     wait
-  end
-
-  def empty_counts
-    { events_seen: 0, push_events_new: 0, duplicates_skipped: 0, malformed_skipped: 0 }
   end
 
   def trap_signals
