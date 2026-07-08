@@ -12,7 +12,7 @@ require "time"
 # (docs/THREAT-MODEL.md threat 2).
 class JsonLogFormatter < ::Logger::Formatter
   # Logger severities are a fixed set; the frozen map spares a per-line downcase.
-  LEVELS = ::Logger::SEV_LABEL.to_h { |label| [label, label.downcase] }.freeze
+  LEVELS = ::Logger::SEV_LABEL.to_h { |label| [ label, label.downcase ] }.freeze
 
   def call(severity, time, _progname, message)
     # Reserved keys are declared first (so they lead the line) and win every
@@ -36,7 +36,7 @@ class JsonLogFormatter < ::Logger::Formatter
   # Keys are symbolized so a string "level"/"ts" key can't slip past the
   # symbol-keyed reserved fields as a duplicate JSON key.
   def sanitize_hash(hash)
-    hash.to_h { |key, value| [utf8(key.to_s).to_sym, sanitize(value)] }
+    hash.to_h { |key, value| [ utf8(key.to_s).to_sym, sanitize(value) ] }
   end
 
   def sanitize(value)

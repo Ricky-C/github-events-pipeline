@@ -29,10 +29,11 @@ module GithubEventsPipeline
     # `docker compose logs -f` is the operator UI: one JSON object per line
     # to stdout, in every environment and process (ingester, worker, console).
     $stdout.sync = true
+    json_formatter = JsonLogFormatter.new
     json_logger = ActiveSupport::Logger.new($stdout)
-    json_logger.formatter = JsonLogFormatter.new
+    json_logger.formatter = json_formatter
     config.logger = json_logger
-    config.log_formatter = JsonLogFormatter.new
+    config.log_formatter = json_formatter
     config.log_level = :info
     config.colorize_logging = false
 

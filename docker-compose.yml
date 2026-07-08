@@ -3,6 +3,9 @@
 # (docs/THREAT-MODEL.md threat 6) — the db is not reachable from the host.
 
 x-app: &app
+  # Shared image name: one build/tag serves every app service instead of
+  # compose tagging an identical image per service.
+  image: github-events-pipeline-app
   build: .
   environment: &app-env
     RAILS_ENV: development
@@ -30,9 +33,13 @@ services:
       # socket-only temporary server that would otherwise pass this check
       # before the real server is listening on 5432.
       test: ["CMD-SHELL", "pg_isready -U postgres -h 127.0.0.1"]
-      interval: 5s
+      # Probe fast only while starting; the check exists for startup
+      # ordering, so steady-state probing every 5s buys nothing.
+      start_period: 30s
+      start_interval: 2s
+      interval: 30s
       timeout: 3s
-      retries: 10
+      retries: 5
 
   # The ONLY service that touches migrations — one-shot, so concurrent
   # services can never race each other running schema changes.
@@ -74,7 +81,7 @@ services:
   # docker compose run --rm test — prepares its own test database
   # (RAILS_ENV alone selects it via config/database.yml).
   test:
-    build: .
+    <<: *app
     environment:
       <<: *app-env
       RAILS_ENV: test

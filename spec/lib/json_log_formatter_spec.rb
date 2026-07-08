@@ -55,7 +55,7 @@ RSpec.describe JsonLogFormatter do
   end
 
   it "scrubs invalid UTF-8 inside hash message values" do
-    line = formatter.call("INFO", time, nil, { repo_name: "bad-\xC3".b, nested: { names: ["ok", "bad-\xC3".b] } })
+    line = formatter.call("INFO", time, nil, { repo_name: "bad-\xC3".b, nested: { names: [ "ok", "bad-\xC3".b ] } })
 
     parsed = JSON.parse(line)
     expect(parsed["repo_name"]).to start_with("bad-")

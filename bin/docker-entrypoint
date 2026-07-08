@@ -1,5 +1,0 @@
-#!/bin/bash -e
-
-# Migrations are owned exclusively by the one-shot `migrate` compose service
-# (prevents concurrent-migration races) — this entrypoint must never run them.
-exec "${@}"

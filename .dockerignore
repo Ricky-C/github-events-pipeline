@@ -10,7 +10,8 @@
 # Ignore all environment files.
 /.env*
 
-# Ignore all default key files.
+# No credentials exist by design (docs/DECISIONS.md D-011); this guard keeps
+# a stray key file out of the image.
 /config/master.key
 /config/credentials/*.key
 
@@ -23,12 +24,6 @@
 # Ignore pidfiles, but keep the directory.
 /tmp/pids/*
 !/tmp/pids/.keep
-
-# Ignore storage (uploaded files in development and any SQLite databases).
-/storage/*
-!/storage/.keep
-/tmp/storage/*
-!/tmp/storage/.keep
 
 # Ignore CI service files.
 /.github

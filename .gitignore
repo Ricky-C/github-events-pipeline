@@ -22,13 +22,7 @@
 !/tmp/pids/
 !/tmp/pids/.keep
 
-# Ignore storage (uploaded files in development and any SQLite databases).
-/storage/*
-!/storage/.keep
-/tmp/storage/*
-!/tmp/storage/
-!/tmp/storage/.keep
-
-# Ignore key files for decrypting credentials and more.
+# No credentials exist by design (docs/DECISIONS.md D-011); this guard keeps
+# a stray `rails credentials:edit` from ever committing a key.
 /config/*.key
 

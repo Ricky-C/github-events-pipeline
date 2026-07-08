@@ -69,7 +69,7 @@ Format: **Context → Decision → Consequences (incl. what we gave up)**
 ## D-011: No HTTP server, no credentials, no production environment
 
 **Context:** `rails new` ships puma, encrypted credentials + master.key, and a production env config. This service has zero inbound surface (docs/THREAT-MODEL.md) and zero secrets by design; containers run the development env (D-010).
-**Decision:** Delete all three at scaffold time: no puma/`config/puma.rb`, no `credentials.yml.enc`/`master.key`, no `config/environments/production.rb` or database.yml production section. Unused railties (mailer, mailbox, text, storage, cable) also removed.
+**Decision:** Delete all three at scaffold time: no puma/`config/puma.rb`, no `credentials.yml.enc`/`master.key`, no `config/environments/production.rb` or database.yml production section. Unused railties (mailer, mailbox, text, storage, cable) also removed. Review cleanup extended the trim: `config.ru`, the `/up` route, the CORS/inflections/locale scaffold files, the no-op `bin/docker-entrypoint`, and stale storage/credentials ignore rules are gone too (key-file ignore rules kept as defense-in-depth).
 **Consequences:** The repo contains nothing that can leak and nothing listening; the "no secrets" claim is verifiable by absence, not policy. Cost: a future inbound surface (health endpoint, metrics) would need puma reintroduced — one Gemfile line, recorded here so it reads as a decision, not an accident.
 
 ## D-012: Discrete PG* connection vars instead of DATABASE_URL

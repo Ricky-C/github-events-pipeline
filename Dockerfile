@@ -55,8 +55,8 @@ USER 1000:1000
 COPY --chown=rails:rails --from=build "${BUNDLE_PATH}" "${BUNDLE_PATH}"
 COPY --chown=rails:rails --from=build /rails /rails
 
-ENTRYPOINT ["/rails/bin/docker-entrypoint"]
-
+# No ENTRYPOINT: compose services supply their own commands directly.
+# Migrations are owned exclusively by the one-shot `migrate` compose service.
 # No server, no EXPOSE: this service has no inbound surface
-# (docs/THREAT-MODEL.md). Compose services supply their own commands.
+# (docs/THREAT-MODEL.md).
 CMD ["/bin/bash"]

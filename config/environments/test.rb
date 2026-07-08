@@ -14,18 +14,12 @@ Rails.application.configure do
   # so ad-hoc rspec runs keep the same guarantee as the compose test service.
   config.eager_load = true
 
-  # Configure public file server for tests with cache-control for performance.
-  config.public_file_server.headers = { "cache-control" => "public, max-age=3600" }
-
   # Show full error reports.
   config.consider_all_requests_local = true
   config.cache_store = :null_store
 
   # Render exception templates for rescuable exceptions and raise for other exceptions.
   config.action_dispatch.show_exceptions = :rescuable
-
-  # Disable request forgery protection in test environment.
-  config.action_controller.allow_forgery_protection = false
 
   # Print deprecation notices to the stderr.
   config.active_support.deprecation = :stderr
