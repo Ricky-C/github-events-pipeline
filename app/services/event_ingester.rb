@@ -1,8 +1,10 @@
-# Takes one parsed /events page, keeps the PushEvents, and lands them in
-# raw_events in a single idempotent statement, with a savepointed per-row
-# fallback when PostgreSQL refuses a row the pre-checks can't see (D-018).
-# Malformed elements are first-class outcomes: warned and counted, never
-# raised — one bad element must not cost the batch.
+# Takes one parsed /events page, keeps the PushEvents, and lands each in
+# raw_events plus its structured push_events projection — both inside one
+# idempotent transaction, with a savepointed per-row fallback when
+# PostgreSQL refuses a row the pre-checks can't see (D-018). Malformed
+# elements are first-class outcomes: warned and counted, never raised —
+# one bad element must not cost the batch. A payload the parser rejects
+# still lands raw; only its structured projection is skipped (D-020).
 class EventIngester
   # Real GitHub event ids are ~11-digit numeric strings; 64 chars is
   # generous headroom while still bounding what payload-derived data can
@@ -14,7 +16,8 @@ class EventIngester
   # Single owner of the counts shape — also the zero for callers whose
   # cycle never reaches ingest (IngestRunner logs it on non-ok polls).
   def self.empty_counts
-    { events_seen: 0, push_events_new: 0, duplicates_skipped: 0, malformed_skipped: 0 }
+    { events_seen: 0, push_events_new: 0, duplicates_skipped: 0, malformed_skipped: 0,
+      structured_skipped: 0 }
   end
 
   def initialize(logger: Rails.logger)
@@ -22,7 +25,8 @@ class EventIngester
   end
 
   # events: the parsed body array from GithubClient::Result#body.
-  # => { events_seen:, push_events_new:, duplicates_skipped:, malformed_skipped: }
+  # => { events_seen:, push_events_new:, duplicates_skipped:, malformed_skipped:,
+  #      structured_skipped: }
   def ingest(events)
     unless events.is_a?(Array)
       warn_malformed("body_not_array", detail: events.class.name)
@@ -31,6 +35,7 @@ class EventIngester
 
     rows = []
     malformed = 0
+    structured_skipped = 0
     events.each do |event|
       unless event.is_a?(Hash)
         malformed += 1
@@ -47,7 +52,17 @@ class EventIngester
         warn_malformed("invalid_event_id", detail: id.to_s.delete("\u0000").slice(0, MAX_EVENT_ID_LENGTH))
         next
       end
-      rows << { github_event_id: id, event_type: event["type"], payload: event }
+      parsed = PushEventParser.call(event)
+      if parsed.malformed?
+        structured_skipped += 1
+        # The raw row still lands below — only the structured projection is
+        # dropped, so this is its own log event, distinct from
+        # ingest.malformed ("never persisted at all"). The id was validated
+        # above, so it is safe to log verbatim.
+        warn_structured_skipped(parsed.reason, detail: id)
+      end
+      rows << { github_event_id: id, event_type: event["type"], payload: event,
+                structured: parsed.ok? ? parsed.attributes.merge(github_event_id: id) : nil }
     end
 
     # The API page itself can repeat an id; PG's DO NOTHING would tolerate
@@ -58,10 +73,12 @@ class EventIngester
     result = insert(rows.uniq { |row| row[:github_event_id] })
     # Rows the database refused even after scrubbing count as malformed, so
     # the reconciliation (seen = new + duplicates + non-push + malformed)
-    # stays exact.
+    # stays exact. structured_skipped is an overlay, not part of that
+    # partition: a parse-rejected event still lands in new or duplicates.
     counts(events.size, result[:inserted],
            candidates - result[:inserted] - result[:rejected],
-           malformed + result[:rejected])
+           malformed + result[:rejected],
+           structured_skipped)
   end
 
   private
@@ -82,13 +99,22 @@ class EventIngester
   # or any future caller-supplied transaction.
   def insert_batch(rows)
     RawEvent.transaction(requires_new: true) do
-      RawEvent.insert_all(
-        rows,
+      inserted = RawEvent.insert_all(
+        rows.map { |row| row.except(:structured) },
         unique_by: :github_event_id,
         # On Postgres, returning yields only the rows actually inserted —
         # exact new-vs-duplicate counts from one round trip.
         returning: [ :github_event_id ]
       ).length
+      # Structured rows share the raw transaction on purpose: the client's
+      # ETag has already advanced past this page, so a crash that landed raw
+      # without structured would be a permanently torn event — the feed
+      # never re-serves it. All parsed-ok rows are written, not just newly
+      # inserted raw ones: DO NOTHING makes every re-ingest self-heal raw
+      # rows that predate push_events or arrive via overlapping poll windows.
+      structured = rows.filter_map { |row| row[:structured] }
+      PushEvent.insert_all(structured, unique_by: :github_event_id) if structured.any?
+      inserted
     end
   end
 
@@ -133,14 +159,20 @@ class EventIngester
     end
   end
 
-  def counts(seen, new_rows, duplicates, malformed)
+  def counts(seen, new_rows, duplicates, malformed, structured_skipped)
     { events_seen: seen, push_events_new: new_rows,
-      duplicates_skipped: duplicates, malformed_skipped: malformed }
+      duplicates_skipped: duplicates, malformed_skipped: malformed,
+      structured_skipped: structured_skipped }
   end
 
   def warn_malformed(reason, detail:)
     # Never the payload itself at this level (CLAUDE.md logging rules) —
     # reason + truncated identifying detail is enough to investigate.
     @logger.warn(component: "ingester", event: "ingest.malformed", reason: reason, detail: detail)
+  end
+
+  def warn_structured_skipped(reason, detail:)
+    @logger.warn(component: "ingester", event: "ingest.structured_skipped",
+                 reason: reason, detail: detail)
   end
 end
