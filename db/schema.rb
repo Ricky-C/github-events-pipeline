@@ -10,9 +10,27 @@
 #
 # It's strongly recommended that you check this file into your version control system.
 
-ActiveRecord::Schema[8.1].define(version: 2026_07_08_000002) do
+ActiveRecord::Schema[8.1].define(version: 2026_07_08_000003) do
   # These are extensions that must be enabled in order to support this database
   enable_extension "pg_catalog.plpgsql"
+
+  create_table "push_events", force: :cascade do |t|
+    t.bigint "actor_github_id", null: false
+    t.string "actor_login", null: false
+    t.string "before_sha"
+    t.datetime "event_created_at", null: false
+    t.string "github_event_id", null: false
+    t.string "head_sha", null: false
+    t.bigint "push_id", null: false
+    t.string "ref", null: false
+    t.bigint "repository_github_id", null: false
+    t.string "repository_name", null: false
+    t.index ["actor_github_id"], name: "index_push_events_on_actor_github_id"
+    t.index ["event_created_at"], name: "index_push_events_on_event_created_at"
+    t.index ["github_event_id"], name: "index_push_events_on_github_event_id", unique: true
+    t.index ["push_id"], name: "index_push_events_on_push_id"
+    t.index ["repository_github_id"], name: "index_push_events_on_repository_github_id"
+  end
 
   create_table "rate_limit_states", force: :cascade do |t|
     t.datetime "created_at", null: false

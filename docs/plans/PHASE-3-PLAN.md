@@ -46,4 +46,4 @@ Avatar downloads / object storage (Extension C — intentionally not built). Fin
 
 ## Notes / Discovered Work
 
-_(append during the phase)_
+- (from Phase 2) `push_events` deliberately carries no actor/repo URL columns (D-020): the enrichment enqueue reads URLs from the in-memory event payload at ingest time per the Tasks list, or joins `raw_events.payload` for backfill. Every payload-sourced URL passes UrlGuard regardless of where it was read from.

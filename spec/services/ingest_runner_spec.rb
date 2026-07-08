@@ -4,7 +4,13 @@ RSpec.describe IngestRunner do
   let(:logger) { RecordingLogger.new }
   let(:client) { instance_double(GithubClient, budget: GithubClient::Budget.new(57, nil, nil)) }
   let(:ingester) { instance_double(EventIngester, ingest: counts) }
-  let(:counts) { { events_seen: 30, push_events_new: 26, duplicates_skipped: 4, malformed_skipped: 0 } }
+  # The full ingester counts shape — kept in lockstep with
+  # EventIngester.empty_counts so the poll.cycle assertion below pins every
+  # key's propagation into the log line.
+  let(:counts) do
+    { events_seen: 30, push_events_new: 26, duplicates_skipped: 4, malformed_skipped: 0,
+      structured_skipped: 0 }
+  end
   let(:now) { Time.utc(2026, 7, 8, 12, 0, 0) }
   let(:clock) { class_double(Time, now: now) }
 

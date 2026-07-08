@@ -8,7 +8,10 @@
 default: &default
   adapter: postgresql
   encoding: unicode
-  max_connections: <%= ENV.fetch("RAILS_MAX_THREADS") { 5 } %>
+  # AR's key is pool:, not max_connections: — the old name was silently
+  # ignored and the pool defaulted to 5, which Solid Queue's worker threads
+  # would exhaust in Phase 3.
+  pool: <%= ENV.fetch("RAILS_MAX_THREADS") { 5 } %>
   host: <%= ENV.fetch("PGHOST") { "localhost" } %>
   username: <%= ENV.fetch("PGUSER") { "postgres" } %>
   password: <%= ENV["PGPASSWORD"] %>

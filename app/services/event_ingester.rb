@@ -1,8 +1,11 @@
-# Takes one parsed /events page, keeps the PushEvents, and lands them in
-# raw_events in a single idempotent statement, with a savepointed per-row
-# fallback when PostgreSQL refuses a row the pre-checks can't see (D-018).
+# Takes one parsed /events page, keeps the PushEvents, and lands each in
+# raw_events plus its structured push_events projection — both inside one
+# idempotent transaction, with a savepointed per-row fallback when
+# PostgreSQL refuses a row the pre-checks can't see (D-018, D-021).
 # Malformed elements are first-class outcomes: warned and counted, never
-# raised — one bad element must not cost the batch.
+# raised — one bad element must not cost the batch. A payload the parser
+# rejects still lands raw; only its structured projection is skipped, and
+# that skip is warned only once the raw row's fate is known (D-020, D-021).
 class EventIngester
   # Real GitHub event ids are ~11-digit numeric strings; 64 chars is
   # generous headroom while still bounding what payload-derived data can
@@ -11,10 +14,17 @@ class EventIngester
   # payload size is bounded upstream by the client's 5 MB response cap.
   MAX_EVENT_ID_LENGTH = 64
 
+  # Everything a single row can raise: PG refusals surface as
+  # StatementInvalid, but a payload jsonb cannot serialize (invalid UTF-8)
+  # dies client-side as JSON::GeneratorError before PG ever sees it —
+  # treating only the former as row-scoped cost a whole page (D-021).
+  ROW_ERRORS = [ ActiveRecord::StatementInvalid, JSON::GeneratorError ].freeze
+
   # Single owner of the counts shape — also the zero for callers whose
   # cycle never reaches ingest (IngestRunner logs it on non-ok polls).
   def self.empty_counts
-    { events_seen: 0, push_events_new: 0, duplicates_skipped: 0, malformed_skipped: 0 }
+    { events_seen: 0, push_events_new: 0, duplicates_skipped: 0, malformed_skipped: 0,
+      structured_skipped: 0 }
   end
 
   def initialize(logger: Rails.logger)
@@ -22,57 +32,81 @@ class EventIngester
   end
 
   # events: the parsed body array from GithubClient::Result#body.
-  # => { events_seen:, push_events_new:, duplicates_skipped:, malformed_skipped: }
+  # => { events_seen:, push_events_new:, duplicates_skipped:, malformed_skipped:,
+  #      structured_skipped: }
   def ingest(events)
     unless events.is_a?(Array)
-      warn_malformed("body_not_array", detail: events.class.name)
+      warn_ingest("ingest.malformed", "body_not_array", detail: events.class.name)
       return self.class.empty_counts
     end
 
     rows = []
+    parse_skips = {}
     malformed = 0
+    in_page_repeats = 0
+    seen_ids = Set.new
     events.each do |event|
       unless event.is_a?(Hash)
         malformed += 1
-        warn_malformed("element_not_object", detail: event.class.name)
+        warn_ingest("ingest.malformed", "element_not_object", detail: event.class.name)
         next
       end
       next unless event["type"] == "PushEvent"
 
       id = event["id"]
-      # NUL is rejected here rather than scrubbed: it can't be stored in the
-      # indexed id column and scrubbing an identifier would forge a new one.
-      unless id.is_a?(String) && !id.empty? && id.length <= MAX_EVENT_ID_LENGTH && !id.include?("\u0000")
+      # NUL and invalid bytes are rejected here rather than scrubbed: they
+      # can't be stored in the indexed id column and scrubbing an
+      # identifier would forge a new one (D-018, D-021).
+      unless StorableString.valid?(id, max: MAX_EVENT_ID_LENGTH)
         malformed += 1
-        warn_malformed("invalid_event_id", detail: id.to_s.delete("\u0000").slice(0, MAX_EVENT_ID_LENGTH))
+        warn_ingest("ingest.malformed", "invalid_event_id",
+                    detail: id.to_s.scrub.delete("\u0000").slice(0, MAX_EVENT_ID_LENGTH))
         next
       end
-      rows << { github_event_id: id, event_type: event["type"], payload: event }
+      # The API page itself can repeat an id. Repeats are skipped before
+      # the parser runs, so every id is parsed, counted, and warned at most
+      # once per ingest — telemetry matches what is persisted (D-021). The
+      # repeat still counts as a duplicate below, keeping the partition
+      # exact (seen = new + duplicates + non-push + malformed).
+      unless seen_ids.add?(id)
+        in_page_repeats += 1
+        next
+      end
+
+      parsed = PushEventParser.call(event)
+      parse_skips[id] = parsed.reason if parsed.malformed?
+      rows << { github_event_id: id, event_type: event["type"], payload: event,
+                structured: parsed.ok? ? parsed.attributes.merge(github_event_id: id) : nil }
     end
 
-    # The API page itself can repeat an id; PG's DO NOTHING would tolerate
-    # it, but deduping first keeps the returned counts honest — an in-page
-    # repeat is a duplicate too, so duplicates are measured against the
-    # pre-dedupe candidate count (seen = new + duplicates + non-push + malformed).
-    candidates = rows.size
-    result = insert(rows.uniq { |row| row[:github_event_id] })
-    # Rows the database refused even after scrubbing count as malformed, so
-    # the reconciliation (seen = new + duplicates + non-push + malformed)
-    # stays exact.
-    counts(events.size, result[:inserted],
-           candidates - result[:inserted] - result[:rejected],
-           malformed + result[:rejected])
+    candidates = rows.size + in_page_repeats
+    result = insert(rows)
+    # structured_skipped is an overlay, not a partition term: a
+    # parse-rejected event lands in new or duplicates. It is settled only
+    # now, once the raw outcome is known — a row the database refused even
+    # after scrubbing counts as malformed alone, so the skip warn's "raw
+    # row kept" meaning is true every time it fires (D-021). The ids were
+    # validated above, so they are safe to log verbatim.
+    skipped = parse_skips.except(*result[:rejected_ids])
+    skipped.each do |skipped_id, reason|
+      warn_ingest("ingest.structured_skipped", reason, detail: skipped_id)
+    end
+    { events_seen: events.size,
+      push_events_new: result[:inserted],
+      duplicates_skipped: candidates - result[:inserted] - result[:rejected_ids].size,
+      malformed_skipped: malformed + result[:rejected_ids].size,
+      structured_skipped: skipped.size }
   end
 
   private
 
   def insert(rows)
-    return { inserted: 0, rejected: 0 } if rows.empty?
+    return { inserted: 0, rejected_ids: [] } if rows.empty?
 
     received_at = Time.current
     stamped = rows.map { |row| row.merge(received_at: received_at) }
-    { inserted: insert_batch(stamped), rejected: 0 }
-  rescue ActiveRecord::StatementInvalid => e
+    { inserted: insert_batch(stamped), rejected_ids: [] }
+  rescue *ROW_ERRORS => e
     insert_each(stamped, batch_error: e)
   end
 
@@ -82,65 +116,84 @@ class EventIngester
   # or any future caller-supplied transaction.
   def insert_batch(rows)
     RawEvent.transaction(requires_new: true) do
-      RawEvent.insert_all(
-        rows,
+      inserted = RawEvent.insert_all(
+        rows.map { |row| row.except(:structured) },
         unique_by: :github_event_id,
         # On Postgres, returning yields only the rows actually inserted —
         # exact new-vs-duplicate counts from one round trip.
         returning: [ :github_event_id ]
       ).length
+      # Structured rows share the raw transaction on purpose: the client's
+      # ETag has already advanced past this page, so a crash that landed raw
+      # without structured would be a permanently torn event — the feed
+      # never re-serves it. All parsed-ok rows are written, not just newly
+      # inserted raw ones: DO NOTHING makes every re-ingest self-heal raw
+      # rows that predate push_events or arrive via overlapping poll windows.
+      structured = rows.filter_map { |row| row[:structured] }
+      PushEvent.insert_all(structured, unique_by: :github_event_id) if structured.any?
+      inserted
     end
   end
 
-  # PG can refuse a row the pre-checks can't see — "\u0000" anywhere in the
-  # payload is unstorable in jsonb (D-018). Retry row by row; a refused row
-  # gets one scrubbed retry, then counts as rejected.
+  # A refused row gets one retry: scrubbed only when the failure describes
+  # the row's data ("\u0000" or invalid bytes in the payload, unstorable
+  # in jsonb — D-018, D-021), unmodified for everything else — contention,
+  # connection blips, unforeseen refusals. Classifying by data-shape rather
+  # than enumerating transients means a false payload_scrubbed marker can
+  # never be stamped onto an authentic payload by an error a list missed.
+  # A row that fails both attempts counts as rejected.
   def insert_each(rows, batch_error:)
     inserted = 0
-    rejected = 0
+    rejected_ids = []
     rows.each do |row|
       inserted += insert_batch([ row ])
-    rescue ActiveRecord::StatementInvalid
+    rescue *ROW_ERRORS => e
       begin
-        inserted += insert_batch([ scrub(row) ])
-        warn_malformed("payload_scrubbed", detail: row[:github_event_id])
-      rescue ActiveRecord::StatementInvalid => e
-        rejected += 1
-        warn_malformed("row_rejected", detail: "#{row[:github_event_id]} (#{e.class.name})")
+        inserted += insert_batch([ data_shaped?(e) ? scrub(row) : row ])
+        warn_ingest("ingest.malformed", "payload_scrubbed", detail: row[:github_event_id]) if data_shaped?(e)
+      rescue *ROW_ERRORS => retry_error
+        rejected_ids << row[:github_event_id]
+        warn_ingest("ingest.malformed", "row_rejected",
+                    detail: "#{row[:github_event_id]} (#{retry_error.class.name})")
       end
     end
 
     # Every row refused means the failure was never row-specific (dead DB,
     # deadlock — StatementInvalid covers those too): re-raise the original
     # so the caller's backoff and loud one-shot paths see it.
-    raise batch_error if rejected == rows.size
-    { inserted: inserted, rejected: rejected }
+    raise batch_error if rejected_ids.size == rows.size
+    { inserted: inserted, rejected_ids: rejected_ids }
+  end
+
+  # Data-shaped: jsonb couldn't serialize the payload client-side, or PG
+  # refused the values themselves (SQLSTATE class 22 — NUL escapes, invalid
+  # encoding, numeric overflow). Everything else is not the row's fault.
+  def data_shaped?(error)
+    error.is_a?(JSON::GeneratorError) || error.cause.is_a?(PG::DataException)
   end
 
   def scrub(row)
-    row.merge(payload: scrub_nul(row[:payload]).merge("payload_scrubbed" => true))
+    row.merge(payload: scrub_unstorable(row[:payload]).merge("payload_scrubbed" => true))
   end
 
-  # Strip NUL from every string, hash keys included. Raw fidelity is
-  # knowingly traded for durability here — NUL can never round-trip
-  # through jsonb, so the verbatim payload was unstorable to begin with.
-  def scrub_nul(value)
+  # Strip what jsonb can never store — NUL anywhere, invalid UTF-8 bytes —
+  # from every string, hash keys included. Raw fidelity is knowingly traded
+  # for durability here: the verbatim payload was unstorable to begin with,
+  # and the marker key records that this copy is not authentic — the parser
+  # refuses to rebuild from it (D-018, D-021). String#scrub must run before
+  # #delete, which raises on invalid encodings.
+  def scrub_unstorable(value)
     case value
-    when String then value.delete("\u0000")
-    when Hash then value.to_h { |key, val| [ scrub_nul(key), scrub_nul(val) ] }
-    when Array then value.map { |element| scrub_nul(element) }
+    when String then value.scrub.delete("\u0000")
+    when Hash then value.to_h { |key, val| [ scrub_unstorable(key), scrub_unstorable(val) ] }
+    when Array then value.map { |element| scrub_unstorable(element) }
     else value
     end
   end
 
-  def counts(seen, new_rows, duplicates, malformed)
-    { events_seen: seen, push_events_new: new_rows,
-      duplicates_skipped: duplicates, malformed_skipped: malformed }
-  end
-
-  def warn_malformed(reason, detail:)
+  def warn_ingest(event, reason, detail:)
     # Never the payload itself at this level (CLAUDE.md logging rules) —
     # reason + truncated identifying detail is enough to investigate.
-    @logger.warn(component: "ingester", event: "ingest.malformed", reason: reason, detail: detail)
+    @logger.warn(component: "ingester", event: event, reason: reason, detail: detail)
   end
 end
