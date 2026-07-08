@@ -2,9 +2,7 @@ require "rails_helper"
 
 RSpec.describe PushEventParser do
   # First PushEvent on the captured page (D-015): kamkade/qvutir.
-  let(:push) do
-    GithubFixtures.json_body(:events_200).find { |event| event["type"] == "PushEvent" }
-  end
+  let(:push) { GithubFixtures.first_push }
 
   def mutate(event, &mutation)
     event.deep_dup.tap(&mutation)
@@ -30,9 +28,7 @@ RSpec.describe PushEventParser do
     end
 
     it "parses every PushEvent on the captured page" do
-      pushes = GithubFixtures.json_body(:events_200).select { |event| event["type"] == "PushEvent" }
-
-      expect(pushes.map { |event| described_class.call(event) }).to all(be_ok)
+      expect(GithubFixtures.push_events.map { |event| described_class.call(event) }).to all(be_ok)
     end
   end
 
@@ -49,6 +45,15 @@ RSpec.describe PushEventParser do
 
       expect(result).to be_ok
       expect(result.attributes[:before_sha]).to be_nil
+    end
+  end
+
+  describe "a created_at with an explicit numeric offset" do
+    it "is accepted and stores the exact instant" do
+      result = described_class.call(mutate(push) { |event| event["created_at"] = "2026-07-08T22:31:54+05:00" })
+
+      expect(result).to be_ok
+      expect(result.attributes[:event_created_at]).to eq(Time.utc(2026, 7, 8, 17, 31, 54))
     end
   end
 
@@ -96,12 +101,30 @@ RSpec.describe PushEventParser do
         [ ->(event) { event["actor"]["login"] = "a" * 65 }, "invalid_actor_login" ],
       "an actor login containing NUL" =>
         [ ->(event) { event["actor"]["login"] = "kam\u0000kade" }, "invalid_actor_login" ],
+      "a ref with invalid UTF-8 bytes" =>
+        [ ->(event) { event["payload"]["ref"] = "refs/heads/bad\xC3" }, "invalid_ref" ],
+      "a head with invalid UTF-8 bytes" =>
+        [ ->(event) { event["payload"]["head"] = "\xC3#{"a" * 39}" }, "invalid_head_sha" ],
+      "an actor login with invalid UTF-8 bytes" =>
+        [ ->(event) { event["actor"]["login"] = "kam\xC3kade" }, "invalid_actor_login" ],
       "a missing created_at" =>
         [ ->(event) { event.delete("created_at") }, "invalid_created_at" ],
       "an unparseable created_at" =>
         [ ->(event) { event["created_at"] = "not-a-date" }, "invalid_created_at" ],
       "a created_at outside PG's comfortable range" =>
-        [ ->(event) { event["created_at"] = "999999-01-01T00:00:00Z" }, "invalid_created_at" ]
+        [ ->(event) { event["created_at"] = "999999-01-01T00:00:00Z" }, "invalid_created_at" ],
+      "a created_at before the year floor" =>
+        [ ->(event) { event["created_at"] = "1999-12-31T23:59:59Z" }, "invalid_created_at" ],
+      "a calendar-invalid created_at (Feb 30 normalizes instead of raising)" =>
+        [ ->(event) { event["created_at"] = "2026-02-30T00:00:00Z" }, "invalid_created_at" ],
+      "a created_at at hour 24 (normalizes to the next day)" =>
+        [ ->(event) { event["created_at"] = "2026-07-08T24:00:00Z" }, "invalid_created_at" ],
+      "a zone-less created_at (would parse as process-local time)" =>
+        [ ->(event) { event["created_at"] = "2026-07-08T17:31:54" }, "invalid_created_at" ],
+      "a fractional-seconds created_at (GitHub's exact whole-second shape only)" =>
+        [ ->(event) { event["created_at"] = "2026-07-08T17:31:54.123Z" }, "invalid_created_at" ],
+      "a D-018-scrubbed payload (rebuilds must not trust repaired bytes)" =>
+        [ ->(event) { event["payload_scrubbed"] = true }, "payload_scrubbed" ]
     }.each do |description, (mutation, reason)|
       it "rejects #{description} as #{reason}" do
         result = described_class.call(mutate(push, &mutation))

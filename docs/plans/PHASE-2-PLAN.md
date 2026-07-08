@@ -40,5 +40,6 @@ Actor/repo enrichment tables (Phase 3) — this phase only extracts what's alrea
 
 ## Notes / Discovered Work
 
-- Pre-Phase-2 `raw_events` rows get no automatic backfill: the structured insert runs for every parsed-ok row on each ingest (D-020), so events that re-appear in the feed self-heal; the remainder is dev data, covered by a one-off console rebuild from raw if ever needed. Deliberately not built.
+- Pre-Phase-2 `raw_events` rows get no automatic backfill: the structured insert runs for every parsed-ok row on each ingest (D-020), so events that re-appear in the feed self-heal; the remainder is dev data, covered by a one-off console rebuild from raw if ever needed. Deliberately not built. Any such rebuild skips `payload_scrubbed` rows by construction — the parser rejects them (D-021).
 - Composite index `(repository_github_id, event_created_at)` considered and deferred until a real query needs it — the plan's single-column indexes stand.
+- Post-review remediations landed in this PR (D-021): UTF-8 validity joined the storability contract (`StorableString` shared predicate, `JSON::GeneratorError` handled row-scoped, scrub repairs invalid bytes); in-page repeats parse once; `structured_skipped` warns/counts settle after the raw insert so they never contradict persistence; transient per-row failures retry unscrubbed. The Tasks line's "structured upsert" is `ON CONFLICT DO NOTHING` (insert-ignore): existing structured rows are never rewritten (divergence tradeoff documented in D-021).

@@ -81,7 +81,7 @@ Assume every operation can be interrupted and replayed:
 
 ## Observability
 
-One JSON object per line to stdout/stderr (`docker compose logs -f` is the operator UI). Canonical events: `poll.cycle`, `poll.rate_limited`, `enrich.success|cache_hit|parked|retry|terminal`, `ingest.malformed`, `ingest.structured_skipped`, `security.url_rejected`. Every log carries `ts`, `level`, `component`, `event`; counts over one poll cycle reconcile (seen = new + duplicates + non-push).
+One JSON object per line to stdout/stderr (`docker compose logs -f` is the operator UI). Canonical events: `poll.cycle`, `poll.rate_limited`, `enrich.success|cache_hit|parked|retry|terminal`, `ingest.malformed`, `ingest.structured_skipped`, `security.url_rejected`. Every log carries `ts`, `level`, `component`, `event`; counts over one poll cycle reconcile (seen = new + duplicates + non-push + malformed; `structured_skipped` is an overlay on top of that partition, not a term in it — see D-020/D-021).
 
 ## Technology Choices (summary — details in docs/DECISIONS.md)
 

@@ -24,6 +24,17 @@ module GithubFixtures
     JSON.parse(parse(name)[:body])
   end
 
+  # The canonical PushEvent subset of a captured page. Specs select through
+  # here so a re-captured fixture (D-015) changes one method, not every
+  # call site.
+  def push_events(name = :events_200)
+    json_body(name).select { |event| event["type"] == "PushEvent" }
+  end
+
+  def first_push(name = :events_200)
+    push_events(name).first
+  end
+
   def parse(name)
     @cache ||= {}
     @cache[name] ||= begin

@@ -1,10 +1,11 @@
 # Takes one parsed /events page, keeps the PushEvents, and lands each in
 # raw_events plus its structured push_events projection — both inside one
 # idempotent transaction, with a savepointed per-row fallback when
-# PostgreSQL refuses a row the pre-checks can't see (D-018). Malformed
-# elements are first-class outcomes: warned and counted, never raised —
-# one bad element must not cost the batch. A payload the parser rejects
-# still lands raw; only its structured projection is skipped (D-020).
+# PostgreSQL refuses a row the pre-checks can't see (D-018, D-021).
+# Malformed elements are first-class outcomes: warned and counted, never
+# raised — one bad element must not cost the batch. A payload the parser
+# rejects still lands raw; only its structured projection is skipped, and
+# that skip is warned only once the raw row's fate is known (D-020, D-021).
 class EventIngester
   # Real GitHub event ids are ~11-digit numeric strings; 64 chars is
   # generous headroom while still bounding what payload-derived data can
@@ -12,6 +13,17 @@ class EventIngester
   # event_type needs no cap: only the exact string "PushEvent" is persisted.
   # payload size is bounded upstream by the client's 5 MB response cap.
   MAX_EVENT_ID_LENGTH = 64
+
+  # Everything a single row can raise: PG refusals surface as
+  # StatementInvalid, but a payload jsonb cannot serialize (invalid UTF-8)
+  # dies client-side as JSON::GeneratorError before PG ever sees it —
+  # treating only the former as row-scoped cost a whole page (D-021).
+  ROW_ERRORS = [ ActiveRecord::StatementInvalid, JSON::GeneratorError ].freeze
+  # Failures that describe contention, not the row's data. Scrubbing on
+  # these would stamp a false payload_scrubbed marker onto an innocent
+  # payload, so their one retry goes in unmodified (D-021).
+  TRANSIENT_ERRORS = [ ActiveRecord::TransactionRollbackError, ActiveRecord::LockWaitTimeout,
+                       ActiveRecord::QueryCanceled ].freeze
 
   # Single owner of the counts shape — also the zero for callers whose
   # cycle never reaches ingest (IngestRunner logs it on non-ok polls).
@@ -29,67 +41,77 @@ class EventIngester
   #      structured_skipped: }
   def ingest(events)
     unless events.is_a?(Array)
-      warn_malformed("body_not_array", detail: events.class.name)
+      warn_ingest("ingest.malformed", "body_not_array", detail: events.class.name)
       return self.class.empty_counts
     end
 
     rows = []
+    parse_skips = {}
     malformed = 0
-    structured_skipped = 0
+    in_page_repeats = 0
+    seen_ids = Set.new
     events.each do |event|
       unless event.is_a?(Hash)
         malformed += 1
-        warn_malformed("element_not_object", detail: event.class.name)
+        warn_ingest("ingest.malformed", "element_not_object", detail: event.class.name)
         next
       end
       next unless event["type"] == "PushEvent"
 
       id = event["id"]
-      # NUL is rejected here rather than scrubbed: it can't be stored in the
-      # indexed id column and scrubbing an identifier would forge a new one.
-      unless id.is_a?(String) && !id.empty? && id.length <= MAX_EVENT_ID_LENGTH && !id.include?("\u0000")
+      # NUL and invalid bytes are rejected here rather than scrubbed: they
+      # can't be stored in the indexed id column and scrubbing an
+      # identifier would forge a new one (D-018, D-021).
+      unless StorableString.valid?(id, max: MAX_EVENT_ID_LENGTH)
         malformed += 1
-        warn_malformed("invalid_event_id", detail: id.to_s.delete("\u0000").slice(0, MAX_EVENT_ID_LENGTH))
+        warn_ingest("ingest.malformed", "invalid_event_id",
+                    detail: id.to_s.scrub.delete("\u0000").slice(0, MAX_EVENT_ID_LENGTH))
         next
       end
-      parsed = PushEventParser.call(event)
-      if parsed.malformed?
-        structured_skipped += 1
-        # The raw row still lands below — only the structured projection is
-        # dropped, so this is its own log event, distinct from
-        # ingest.malformed ("never persisted at all"). The id was validated
-        # above, so it is safe to log verbatim.
-        warn_structured_skipped(parsed.reason, detail: id)
+      # The API page itself can repeat an id. Repeats are skipped before
+      # the parser runs, so every id is parsed, counted, and warned at most
+      # once per ingest — telemetry matches what is persisted (D-021). The
+      # repeat still counts as a duplicate below, keeping the partition
+      # exact (seen = new + duplicates + non-push + malformed).
+      unless seen_ids.add?(id)
+        in_page_repeats += 1
+        next
       end
+
+      parsed = PushEventParser.call(event)
+      parse_skips[id] = parsed.reason if parsed.malformed?
       rows << { github_event_id: id, event_type: event["type"], payload: event,
                 structured: parsed.ok? ? parsed.attributes.merge(github_event_id: id) : nil }
     end
 
-    # The API page itself can repeat an id; PG's DO NOTHING would tolerate
-    # it, but deduping first keeps the returned counts honest — an in-page
-    # repeat is a duplicate too, so duplicates are measured against the
-    # pre-dedupe candidate count (seen = new + duplicates + non-push + malformed).
-    candidates = rows.size
-    result = insert(rows.uniq { |row| row[:github_event_id] })
-    # Rows the database refused even after scrubbing count as malformed, so
-    # the reconciliation (seen = new + duplicates + non-push + malformed)
-    # stays exact. structured_skipped is an overlay, not part of that
-    # partition: a parse-rejected event still lands in new or duplicates.
-    counts(events.size, result[:inserted],
-           candidates - result[:inserted] - result[:rejected],
-           malformed + result[:rejected],
-           structured_skipped)
+    candidates = rows.size + in_page_repeats
+    result = insert(rows)
+    # structured_skipped is an overlay, not a partition term: a
+    # parse-rejected event lands in new or duplicates. It is settled only
+    # now, once the raw outcome is known — a row the database refused even
+    # after scrubbing counts as malformed alone, so the skip warn's "raw
+    # row kept" meaning is true every time it fires (D-021). The ids were
+    # validated above, so they are safe to log verbatim.
+    skipped = parse_skips.except(*result[:rejected_ids])
+    skipped.each do |skipped_id, reason|
+      warn_ingest("ingest.structured_skipped", reason, detail: skipped_id)
+    end
+    { events_seen: events.size,
+      push_events_new: result[:inserted],
+      duplicates_skipped: candidates - result[:inserted] - result[:rejected_ids].size,
+      malformed_skipped: malformed + result[:rejected_ids].size,
+      structured_skipped: skipped.size }
   end
 
   private
 
   def insert(rows)
-    return { inserted: 0, rejected: 0 } if rows.empty?
+    return { inserted: 0, rejected_ids: [] } if rows.empty?
 
     received_at = Time.current
     stamped = rows.map { |row| row.merge(received_at: received_at) }
-    { inserted: insert_batch(stamped), rejected: 0 }
-  rescue ActiveRecord::StatementInvalid => e
+    { inserted: insert_batch(stamped), rejected_ids: [] }
+  rescue *ROW_ERRORS => e
     insert_each(stamped, batch_error: e)
   end
 
@@ -118,61 +140,57 @@ class EventIngester
     end
   end
 
-  # PG can refuse a row the pre-checks can't see — "\u0000" anywhere in the
-  # payload is unstorable in jsonb (D-018). Retry row by row; a refused row
-  # gets one scrubbed retry, then counts as rejected.
+  # A refused row gets one retry: unmodified when the failure was
+  # contention (deadlock, lock/statement timeout — retrying is the honest
+  # remedy), scrubbed when it was the data ("\u0000" or invalid bytes
+  # anywhere in the payload, unstorable in jsonb — D-018, D-021). A row
+  # that fails both attempts counts as rejected.
   def insert_each(rows, batch_error:)
     inserted = 0
-    rejected = 0
+    rejected_ids = []
     rows.each do |row|
       inserted += insert_batch([ row ])
-    rescue ActiveRecord::StatementInvalid
+    rescue *ROW_ERRORS => e
       begin
-        inserted += insert_batch([ scrub(row) ])
-        warn_malformed("payload_scrubbed", detail: row[:github_event_id])
-      rescue ActiveRecord::StatementInvalid => e
-        rejected += 1
-        warn_malformed("row_rejected", detail: "#{row[:github_event_id]} (#{e.class.name})")
+        transient = TRANSIENT_ERRORS.any? { |error_class| e.is_a?(error_class) }
+        inserted += insert_batch([ transient ? row : scrub(row) ])
+        warn_ingest("ingest.malformed", "payload_scrubbed", detail: row[:github_event_id]) unless transient
+      rescue *ROW_ERRORS => retry_error
+        rejected_ids << row[:github_event_id]
+        warn_ingest("ingest.malformed", "row_rejected",
+                    detail: "#{row[:github_event_id]} (#{retry_error.class.name})")
       end
     end
 
     # Every row refused means the failure was never row-specific (dead DB,
     # deadlock — StatementInvalid covers those too): re-raise the original
     # so the caller's backoff and loud one-shot paths see it.
-    raise batch_error if rejected == rows.size
-    { inserted: inserted, rejected: rejected }
+    raise batch_error if rejected_ids.size == rows.size
+    { inserted: inserted, rejected_ids: rejected_ids }
   end
 
   def scrub(row)
-    row.merge(payload: scrub_nul(row[:payload]).merge("payload_scrubbed" => true))
+    row.merge(payload: scrub_unstorable(row[:payload]).merge("payload_scrubbed" => true))
   end
 
-  # Strip NUL from every string, hash keys included. Raw fidelity is
-  # knowingly traded for durability here — NUL can never round-trip
-  # through jsonb, so the verbatim payload was unstorable to begin with.
-  def scrub_nul(value)
+  # Strip what jsonb can never store — NUL anywhere, invalid UTF-8 bytes —
+  # from every string, hash keys included. Raw fidelity is knowingly traded
+  # for durability here: the verbatim payload was unstorable to begin with,
+  # and the marker key records that this copy is not authentic — the parser
+  # refuses to rebuild from it (D-018, D-021). String#scrub must run before
+  # #delete, which raises on invalid encodings.
+  def scrub_unstorable(value)
     case value
-    when String then value.delete("\u0000")
-    when Hash then value.to_h { |key, val| [ scrub_nul(key), scrub_nul(val) ] }
-    when Array then value.map { |element| scrub_nul(element) }
+    when String then value.scrub.delete("\u0000")
+    when Hash then value.to_h { |key, val| [ scrub_unstorable(key), scrub_unstorable(val) ] }
+    when Array then value.map { |element| scrub_unstorable(element) }
     else value
     end
   end
 
-  def counts(seen, new_rows, duplicates, malformed, structured_skipped)
-    { events_seen: seen, push_events_new: new_rows,
-      duplicates_skipped: duplicates, malformed_skipped: malformed,
-      structured_skipped: structured_skipped }
-  end
-
-  def warn_malformed(reason, detail:)
+  def warn_ingest(event, reason, detail:)
     # Never the payload itself at this level (CLAUDE.md logging rules) —
     # reason + truncated identifying detail is enough to investigate.
-    @logger.warn(component: "ingester", event: "ingest.malformed", reason: reason, detail: detail)
-  end
-
-  def warn_structured_skipped(reason, detail:)
-    @logger.warn(component: "ingester", event: "ingest.structured_skipped",
-                 reason: reason, detail: detail)
+    @logger.warn(component: "ingester", event: event, reason: reason, detail: detail)
   end
 end

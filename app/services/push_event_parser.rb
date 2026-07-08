@@ -1,18 +1,22 @@
 # Projects one PushEvent hash (string-keyed JSON.parse output) into
 # column-ready attributes for push_events, or reports why it can't.
 #
-# The contract (D-020): attributes returned as :ok are always storable —
-# string caps, bigint ranges, and timestamp bounds are verified here, so the
-# structured insert can never be the statement that poisons the shared
-# raw+structured transaction in EventIngester. Anything unverifiable is
-# rejected, never coerced: truncating a ref, SHA, or login would persist a
-# forged identifier (the same reasoning as D-018's event-id rule).
+# The contract (D-020, D-021): attributes returned as :ok are always
+# storable — string caps, encoding validity, bigint ranges, and timestamp
+# bounds are verified here, so the structured insert can never be the
+# statement that poisons the shared raw+structured transaction in
+# EventIngester. Anything unverifiable is rejected, never coerced:
+# truncating or repairing a ref, SHA, or login would persist a forged
+# identifier (the same reasoning as D-018's event-id rule).
 #
 # Runs after EventIngester's event-id validation; the id stays the
 # ingester's concern and is neither re-checked nor returned here.
 class PushEventParser
-  # git bounds a loose-ref filename component at NAME_MAX (255 bytes);
-  # GitHub-hosted refs run far shorter. Longer is hostile, not truncatable.
+  # GitHub refuses refs longer than 255 bytes at push time ("GH005: Sorry,
+  # refs longer than 255 bytes are not allowed"), so a longer ref cannot
+  # reach the feed; counting characters accepts a strict superset of that.
+  # Longer is hostile, not truncatable (D-021 corrects D-020's NAME_MAX
+  # citation — the bound stands, the guarantor is GitHub's cap).
   MAX_REF_LENGTH = 255
   # GitHub caps owner logins at 39 chars and repository names at 100:
   # 39 + "/" + 100.
@@ -24,9 +28,10 @@ class PushEventParser
   # GitHub hosts SHA-1 repositories only; when SHA-256 repos land this is a
   # one-regex change plus a rebuild from raw (D-004 guarantees the rebuild).
   SHA_PATTERN = /\A\h{40}\z/
-  # ISO8601 with offset and fraction fits well under 40 chars — anything
-  # longer is not a timestamp.
-  MAX_TIMESTAMP_LENGTH = 40
+  # Exactly the shape GitHub serves: whole seconds, explicit zone. A
+  # zone-less string parses in process-local time — an environment-dependent
+  # instant — so it is rejected, not assumed UTC (D-021).
+  TIMESTAMP_PATTERN = /\A\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:Z|[+-]\d{2}:\d{2})\z/
   # The storability bounds: PG would refuse an id past bigint or a year it
   # can't represent, and a refused statement would take the whole shared
   # transaction down — so out-of-range is malformed here, not a DB error.
@@ -52,6 +57,11 @@ class PushEventParser
   def call
     catch(:malformed) do
       malformed!("event_not_object") unless @event.is_a?(Hash)
+      # A D-018-scrubbed payload had NUL or invalid bytes repaired in place,
+      # so nothing parsed from it can be trusted as authentic — a rebuild
+      # from scrubbed raw must not mint structured rows the original ingest
+      # refused (D-021). Live ingest always parses the pre-scrub event.
+      malformed!("payload_scrubbed") if @event["payload_scrubbed"]
       Result.new(status: :ok, attributes: attributes)
     end
   end
@@ -92,31 +102,36 @@ class PushEventParser
     value
   end
 
-  # NUL can't live in a text column, and scrubbing an identifying string
-  # would store a forged one (D-018) — so it's rejected like any other
-  # unstorable value. Caps count characters, matching the id check in
-  # EventIngester; a char cap still bounds bytes at 4x.
+  # Rejected, never coerced: truncating or repairing an identifying string
+  # stores a forged one (D-018). The predicate is shared with
+  # EventIngester's id check so the raw and structured layers can't drift.
   def bounded_string(value, max, reason)
-    unless value.is_a?(String) && !value.empty? && value.length <= max && !value.include?("\u0000")
-      malformed!(reason)
-    end
+    malformed!(reason) unless StorableString.valid?(value, max: max)
     value
   end
 
+  # valid_encoding? must run before the regex: Regexp#match? raises
+  # ArgumentError on invalid UTF-8, and an exception here would cost the
+  # whole page, not the row (D-021).
   def sha(value, reason)
-    malformed!(reason) unless value.is_a?(String) && SHA_PATTERN.match?(value)
+    malformed!(reason) unless value.is_a?(String) && value.valid_encoding? && SHA_PATTERN.match?(value)
     value
   end
 
   def timestamp(value)
-    unless value.is_a?(String) && value.length <= MAX_TIMESTAMP_LENGTH
+    unless value.is_a?(String) && value.valid_encoding? && TIMESTAMP_PATTERN.match?(value)
       malformed!("invalid_created_at")
     end
     time = begin
       Time.iso8601(value)
-    rescue ArgumentError, TypeError
+    rescue ArgumentError
       malformed!("invalid_created_at")
     end
+    # Time.iso8601 normalizes calendar-invalid values (Feb 30 → Mar 2,
+    # 24:00 → next day, :60 → next minute) instead of raising. Only a value
+    # that round-trips verbatim is stored as it arrived — anything else is
+    # a coercion, and coercions are rejected (D-020, D-021).
+    malformed!("invalid_created_at") unless time.iso8601 == value
     malformed!("invalid_created_at") unless YEAR_RANGE.cover?(time.year)
     time
   end
