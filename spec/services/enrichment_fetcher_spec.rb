@@ -118,6 +118,53 @@ RSpec.describe EnrichmentFetcher do
       # Stale reset falls back to a blind wait — never a zero-delay hot loop.
       expect(outcome.run_at).to eq(Time.now + described_class::PARK_FALLBACK + jitter)
     end
+
+    # The only input that reaches the clamp's floor: the fallback branch above
+    # never does, because PARK_FALLBACK is already 60.
+    it "never parks in the past on a Retry-After of zero" do
+      stub_request(:get, user_url).to_return(GithubApiStubs.too_many_requests_429(retry_after: 0))
+
+      outcome = fetcher.call(actor)
+
+      expect(outcome.run_at).to eq(Time.now + 1 + jitter)
+    end
+  end
+
+  # A park leaves the record `enqueued` — that is the in-flight dedup — so a
+  # wait honored past the rate window would wedge the entity forever. Both
+  # park sites are covered: a desynced header can arrive on either (D-024).
+  describe "the park cap" do
+    let(:cap) { GithubClient::RateWindow::MAX_WAIT }
+
+    it "caps a rate-limited park at the rate window" do
+      stub_request(:get, user_url)
+        .to_return(GithubApiStubs.rate_limited_403(reset_at: 70.years.from_now))
+
+      expect(fetcher.call(actor).run_at).to eq(Time.now + cap + jitter)
+    end
+
+    it "caps a park driven by an absurd Retry-After" do
+      stub_request(:get, user_url).to_return(GithubApiStubs.too_many_requests_429(retry_after: 99_999_999))
+
+      expect(fetcher.call(actor).run_at).to eq(Time.now + cap + jitter)
+    end
+
+    it "caps a budget-gate park at the rate window" do
+      RateLimitState.record!(remaining: 0, reset_at: 70.years.from_now)
+
+      outcome = fetcher.call(actor)
+
+      expect(outcome.run_at).to eq(Time.now + cap + jitter)
+      expect(entry(:info, "enrich.parked")).to include(reason: "budget")
+      expect(WebMock).not_to have_requested(:get, /./)
+    end
+
+    it "leaves an honest reset inside the window untouched" do
+      reset_at = 45.minutes.from_now
+      stub_request(:get, user_url).to_return(GithubApiStubs.rate_limited_403(reset_at: reset_at))
+
+      expect(fetcher.call(actor).run_at.to_i).to eq(reset_at.to_i + jitter)
+    end
   end
 
   describe "budget gate" do
@@ -177,6 +224,25 @@ RSpec.describe EnrichmentFetcher do
       expect(outcome.error).to be_present
       expect(actor.reload.fetch_status).to eq("enqueued")
       expect(entry(:warn, "enrich.retry")).to include(entity: "actor")
+    end
+  end
+
+  # The scrub repairs `data`; it cannot repair `etag`, and the ArgumentError a
+  # NUL bind raises never reaches the classifier at all. The client drops an
+  # unstorable ETag before it ever reaches this layer, so the record settles
+  # instead of cycling claim → fail → release, spending a request each lap.
+  describe "hostile ETag" do
+    it "settles the record with no etag rather than failing the write" do
+      stub_request(:get, user_url).to_return(
+        status: 200, headers: { "etag" => "W/\"a\u0000b\"" }, body: '{"login":"octocat"}'
+      )
+
+      expect { fetcher.call(actor) }.not_to raise_error
+
+      actor.reload
+      expect(actor.fetch_status).to eq("fetched")
+      expect(actor.etag).to be_nil
+      expect(actor.data).to eq("login" => "octocat")
     end
   end
 

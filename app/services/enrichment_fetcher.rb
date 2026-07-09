@@ -106,19 +106,20 @@ class EnrichmentFetcher
   end
 
   # Retry-After wins when present (a secondary limit's short wait vs the
-  # primary bucket's far-off reset — same reasoning as IngestRunner); a
-  # reset_at already in the past must not become a zero-wait hot loop.
+  # primary bucket's far-off reset — same reasoning as IngestRunner). Both the
+  # zero-wait hot loop and the far-future park that would wedge this record at
+  # `enqueued` forever are bounded by the shared clamp (D-024).
   def park_at(retry_after:, reset_at:)
     now = @clock.now
-    base =
+    seconds =
       if retry_after
-        now + retry_after
+        retry_after
       elsif reset_at && reset_at > now
-        reset_at
+        (reset_at - now).ceil
       else
-        now + PARK_FALLBACK
+        PARK_FALLBACK
       end
-    [ base, now + 1 ].max + @jitter.call
+    now + GithubClient::RateWindow.clamp(seconds) + @jitter.call
   end
 
   def retry_later(record, result)

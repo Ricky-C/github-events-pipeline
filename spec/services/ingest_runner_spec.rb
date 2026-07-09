@@ -100,6 +100,19 @@ RSpec.describe IngestRunner do
       run_loop([ result(:rate_limited, rate: { remaining: 0, reset_at: now - 30 }) ])
       expect(cycle_logs.last[:sleep_for]).to eq(1)
     end
+
+    # A header asking for a wait past the rate window is a desynced shard or a
+    # rewritten Retry-After, not an instruction (D-024). Honoring it would
+    # blind the poller for years; the enrichment parks share the clamp.
+    it "never sleeps past the rate window on a far-future reset_at" do
+      run_loop([ result(:rate_limited, rate: { remaining: 0, reset_at: now + 70.years }) ])
+      expect(cycle_logs.last[:sleep_for]).to eq(GithubClient::RateWindow::MAX_WAIT)
+    end
+
+    it "never sleeps past the rate window on an absurd retry-after" do
+      run_loop([ result(:rate_limited, retry_after: 99_999_999) ])
+      expect(cycle_logs.last[:sleep_for]).to eq(GithubClient::RateWindow::MAX_WAIT)
+    end
   end
 
   describe "backoff" do

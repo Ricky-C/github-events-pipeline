@@ -222,4 +222,76 @@ RSpec.describe GithubClient, "#poll_events" do
         .with(hash_including(event: "auth.unexpected_401"))
     end
   end
+
+  # Net::HTTP hands header bytes through verbatim, and `etag` is the one
+  # externally-sourced string that reaches a column. PostgreSQL refuses a NUL
+  # in a bind with a bare ArgumentError — outside every rescue this project
+  # has — and refuses invalid UTF-8 with an error the D-018 scrub cannot
+  # repair, because scrubbing an ETag would forge one. So the client refuses
+  # it here, the way the parser refuses an unstorable payload field (D-024).
+  describe "unstorable ETags" do
+    {
+      "a NUL" => "W/\"a\u0000b\"",
+      "invalid UTF-8" => "W/\"a\xC3\x28b\"".dup.force_encoding("UTF-8"),
+      "an oversized value" => "W/\"#{'a' * 300}\""
+    }.each do |description, etag|
+      it "drops an ETag carrying #{description} rather than persist it" do
+        RateLimitState.record!(etag: 'W/"old"')
+        stub_request(:get, events_url).to_return(status: 200, headers: { "etag" => etag }, body: "[]")
+
+        result = client.poll_events
+
+        expect(result).to be_ok
+        expect(result.etag).to be_nil
+        # The stored ETag stands: the next poll is unconditional, which costs
+        # one request. Storing the header would cost the row.
+        expect(RateLimitState.current.etag).to eq('W/"old"')
+      end
+    end
+  end
+
+  # Each of these reaches an integer or timestamp column through `persist`,
+  # which runs after *every* response — so a value the column cannot hold
+  # would take down every later call, not just the one that carried it (D-024).
+  describe "implausible rate headers" do
+    it "ignores an x-ratelimit-reset outside the storable epoch range" do
+      RateLimitState.record!(reset_at: Time.at(1_783_600_000).utc)
+      stub_request(:get, events_url)
+        .to_return(status: 200, headers: { "x-ratelimit-reset" => "999999999999999999999" }, body: "[]")
+
+      result = nil
+      expect { result = client.poll_events }.not_to raise_error
+      expect(result.rate[:reset_at]).to be_nil
+      expect(RateLimitState.current.reset_at).to eq(Time.at(1_783_600_000).utc)
+    end
+
+    it "ignores an x-ratelimit-remaining outside the integer column range" do
+      stub_request(:get, events_url)
+        .to_return(status: 200, headers: { "x-ratelimit-remaining" => "2147483648" }, body: "[]")
+
+      expect { client.poll_events }.not_to raise_error
+      expect(client.budget.remaining).to be_nil
+    end
+
+    it "ignores a negative x-poll-interval" do
+      stub_request(:get, events_url)
+        .to_return(status: 200, headers: { "x-poll-interval" => "-1" }, body: "[]")
+
+      expect(client.poll_events.poll_interval).to be_nil
+    end
+
+    it "still accepts ordinary values at those bounds" do
+      reset = Time.at(1_783_600_000).utc
+      stub_request(:get, events_url).to_return(
+        status: 200,
+        headers: { "x-ratelimit-reset" => reset.to_i.to_s, "x-ratelimit-remaining" => "0",
+                   "x-poll-interval" => "60" },
+        body: "[]"
+      )
+
+      result = client.poll_events
+      expect(result.rate).to eq(remaining: 0, reset_at: reset)
+      expect(result.poll_interval).to eq(60)
+    end
+  end
 end

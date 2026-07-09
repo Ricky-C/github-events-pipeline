@@ -14,6 +14,19 @@ class GithubClient
   MAX_BODY_BYTES = 5 * 1024 * 1024
   MAX_REDIRECTS = 1
 
+  # Real ETags are ~40 characters; the cap bounds what a response header can
+  # push into a text column, the way MAX_EVENT_ID_LENGTH bounds a payload id
+  # (docs/THREAT-MODEL.md length validation).
+  MAX_ETAG_LENGTH = 255
+
+  # Header integers reach `integer` and `timestamp` columns. A value the
+  # column cannot store raises out of `persist`, which runs after *every*
+  # response — so one implausible header would brick every later call, not
+  # just the one that carried it. The epoch bound is D-020's YEAR_RANGE idiom
+  # (years 2000-9999); the integer bound is PostgreSQL's `integer` range.
+  RESET_EPOCH_RANGE = (Time.utc(2000).to_i..Time.utc(9999, 12, 31).to_i).freeze
+  INT_COLUMN_RANGE = (0..(2**31 - 1)).freeze
+
   REQUEST_HEADERS = {
     # GitHub rejects requests without a User-Agent.
     "User-Agent" => "github-events-pipeline/#{VERSION}",
@@ -45,9 +58,11 @@ class GithubClient
     @state = state
   end
 
-  # GET /events with the persisted ETag. A 304 costs nothing to parse and
-  # (per GitHub's documented behavior) should not consume budget — the
-  # persisted mirror simply records whatever the response headers claim.
+  # GET /events with the persisted ETag. A 304 costs nothing to parse, but it
+  # does cost budget: GitHub exempts a conditional request from the primary
+  # rate limit only when it carries an Authorization header, and this client
+  # never sends one (D-017, D-022). The mirror records whatever the response
+  # headers claim.
   def poll_events
     perform(URI(EVENTS_URL), etag: @state.current&.etag, events: true)
   end
@@ -78,8 +93,9 @@ class GithubClient
         result = map(status, response, body, events: events)
         # The stored ETag advances only past a page that actually parsed —
         # persisted any earlier, the next conditional poll would 304 against
-        # content that was never ingested and silently skip those events.
-        @state.record!(etag: response["etag"]) if events && result.ok? && response["etag"]
+        # content that was never ingested and silently skip those events. An
+        # unstorable ETag is already nil by here, so it cannot advance either.
+        @state.record!(etag: result.etag) if events && result.ok? && result.etag
         return result
       end
 
@@ -153,7 +169,7 @@ class GithubClient
   # in perform, and only once the body has parsed.
   def persist(response, events:)
     attrs = read_rate(response).compact
-    if events && (interval = int_header(response, "x-poll-interval"))
+    if events && (interval = poll_interval(response))
       attrs[:poll_interval] = interval
     end
     @state.record!(attrs) unless attrs.empty?
@@ -163,11 +179,11 @@ class GithubClient
     rate = read_rate(response)
     case status
     when 200..299
-      Result.new(status: :ok, body: JSON.parse(body), etag: response["etag"],
-                 poll_interval: events ? int_header(response, "x-poll-interval") : nil, rate: rate)
+      Result.new(status: :ok, body: JSON.parse(body), etag: storable_etag(response),
+                 poll_interval: events ? poll_interval(response) : nil, rate: rate)
     when 304
       Result.new(status: :not_modified,
-                 poll_interval: events ? int_header(response, "x-poll-interval") : nil, rate: rate)
+                 poll_interval: events ? poll_interval(response) : nil, rate: rate)
     when 403, 429
       # All 403s map to :rate_limited — primary-limit exhaustion and
       # secondary/abuse detection both mean "stop asking until told".
@@ -187,13 +203,39 @@ class GithubClient
     Result.new(status: :transient_error, error: "unparseable body: #{e.class}", rate: rate)
   end
 
+  # This client is the single validation layer for response headers, the way
+  # PushEventParser is for payload fields (D-020): everything it emits — in a
+  # Result or into the mirror — is already storable, so no caller has to
+  # re-check and the two layers cannot drift. An unstorable ETag becomes nil,
+  # which only means the next fetch is unconditional (D-024).
+  def storable_etag(response)
+    etag = response["etag"]
+    return etag if etag.nil? || StorableString.valid?(etag, max: MAX_ETAG_LENGTH)
+
+    # Never the header bytes themselves: they are why this line exists.
+    Rails.logger.warn(component: "github_client", event: "etag.unstorable",
+                      bytesize: etag.bytesize)
+    nil
+  end
+
   # One reader for the rate headers so the persisted mirror and Result#rate
   # can never disagree about the same response. Values stay nil-able here
-  # (the Result contract exposes unknowns); persist compacts its copy.
+  # (the Result contract exposes unknowns); persist compacts its copy. An
+  # out-of-range header reads as unknown rather than raising on the way to a
+  # column that cannot hold it.
   def read_rate(response)
-    reset = int_header(response, "x-ratelimit-reset")
-    { remaining: int_header(response, "x-ratelimit-remaining"),
+    reset = bounded_header(response, "x-ratelimit-reset", RESET_EPOCH_RANGE)
+    { remaining: bounded_header(response, "x-ratelimit-remaining", INT_COLUMN_RANGE),
       reset_at: reset && Time.at(reset).utc }
+  end
+
+  def poll_interval(response)
+    bounded_header(response, "x-poll-interval", INT_COLUMN_RANGE)
+  end
+
+  def bounded_header(response, name, range)
+    value = int_header(response, name)
+    value if value && range.cover?(value)
   end
 
   def int_header(response, name)

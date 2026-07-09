@@ -19,7 +19,7 @@ class GithubClient
 
   # GET https://api.github.com/events using the persisted ETag.
   # Persists new ETag + rate state from response headers.
-  # Never consumes budget on 304.
+  # A 304 consumes budget like any request (D-022).
   # @return [Result]
   def poll_events
 
@@ -41,13 +41,15 @@ Immutable value object. Exactly one `status` per call:
 | `status` | Meaning | Populated fields |
 |---|---|---|
 | `:ok` | 2xx with parseable JSON body | `body` (parsed), `etag`, `poll_interval`*, `rate` |
-| `:not_modified` | 304 — no budget consumed | `poll_interval`*, `rate` (unchanged) |
+| `:not_modified` | 304 — body unchanged; budget still consumed (D-022) | `poll_interval`*, `rate` |
 | `:rate_limited` | 403 with `x-ratelimit-remaining: 0`, or 429 | `rate` (incl. `reset_at`), `retry_after`? |
 | `:not_found` | 404 / 410 — terminal, never retry | `rate` |
 | `:transient_error` | 5xx, timeout, connection/DNS failure, unparseable body, body over size cap | `error` (class + message), `rate`? |
 | `:rejected_url` | `fetch_resource` refused the URL pre-flight (no request made) | `error` (reason) |
 
 `poll_interval` only on `/events` responses. `rate` = `{remaining: Integer?, reset_at: Time?}` — nil-able before first response. `retry_after` = integer seconds, normalized from both the delta-seconds and HTTP-date forms of the header; callers must prefer it over `reset_at` when both are present (secondary limits ask for a short wait while the primary reset sits far out).
+
+**Everything a Result carries is storable (D-024).** The client is the single validation layer for response headers, as `PushEventParser` is for payload fields (D-020) — a caller may persist a `Result` field without re-checking it, and must not try, or the two layers drift. `etag` is `nil` unless it passes `StorableString` (≤ 255 chars, valid UTF-8, NUL-free); `rate[:reset_at]` is `nil` unless its epoch falls in years 2000–9999; `rate[:remaining]` and `poll_interval` are `nil` unless they fit PostgreSQL's `integer`. Dropped values read as *unknown*, which is the boot state every caller already handles.
 
 Convenience predicates: `ok?`, `not_modified?`, `rate_limited?`, `terminal?` (`:not_found` or `:rejected_url`), `retryable?` (`:transient_error`).
 
@@ -61,7 +63,9 @@ Budget = Struct.new(:remaining, :reset_at, :updated_at) do
 end
 ```
 
-**Policy constants (live with the callers, documented here):** `ENRICHMENT_RESERVE = 5` — enrichment jobs check `budget.spendable?(reserve: ENRICHMENT_RESERVE)` before fetching and park until `reset_at` if not. Polling checks nothing — it has priority by design (D-006): real polls cost ~1/interval and 304s are free.
+**Policy constants (live with the callers, documented here):** `ENRICHMENT_RESERVE = 5` — enrichment jobs check `budget.spendable?(reserve: ENRICHMENT_RESERVE)` before fetching and park until `reset_at` if not. Polling checks nothing — it has priority by design (D-006), but is capped by `IngestRunner::POLL_FLOOR = 120s` because every poll costs budget, 304s included (D-022).
+
+**`GithubClient::RateWindow.clamp(seconds)`** is client-owned, like `UrlGuard`, and bounds every wait a caller derives from a rate header to `MAX_WAIT = 1.hour`, floored at 1s. The one-hour primary window is a fact about the API, so the bound lives with the client; both enrichment park sites and `IngestRunner#until_reset` call it, so it cannot drift (D-024).
 
 ## Request Discipline
 
@@ -94,8 +98,8 @@ After **every** real (non-304-shortcut… i.e., every actual HTTP) response, inc
 
 - persist `x-ratelimit-remaining` → `remaining`, `x-ratelimit-reset` (epoch) → `reset_at`, now → `updated_at`
 - `/events` responses: persist `x-poll-interval`; persist `etag` **only from a 200 whose body parsed** — an unparseable 200 must not advance the stored ETag past a page that was never ingested (the next conditional poll would 304 against content we never landed)
-- **ETags are stored and echoed verbatim** — GitHub returns weak ETags (`W/"..."`); stripping the `W/` prefix means it never matches, every poll silently costs budget, and the core design is defeated invisibly
-- **304s may not be free in practice** — despite GitHub's documentation, a live 304 was observed carrying a decremented `x-ratelimit-remaining` (D-017). The mirror records whatever headers say; no code may assume 304s cost nothing
+- **ETags are stored and echoed verbatim** — GitHub returns weak ETags (`W/"..."`); stripping the `W/` prefix means it never matches, every poll silently costs budget, and the core design is defeated invisibly. Verbatim, but not unconditionally: an ETag that fails `StorableString` is dropped rather than persisted, and the stored one does not advance (D-024)
+- **304s are not free here** — GitHub exempts a conditional request from the primary rate limit only when it "was made while correctly authorized with an `Authorization` header", and this client never sends one; measured 304s decrement `x-ratelimit-remaining` (D-017, D-022). The mirror records whatever headers say; no code may assume 304s cost nothing
 - `fetch_resource` with `etag:` given → on `304`, return `:not_modified` (caller keeps existing record; refresh `fetched_at` only)
 
 **Concurrency note (accepted, documented):** ingester and worker may interleave writes; last-write-wins is acceptable because headers self-correct within one request and `ENRICHMENT_RESERVE` absorbs the race. No row locking. (Record as part of D-006 lineage if questioned.)
@@ -130,18 +134,18 @@ loop:
   case r.status
   when :ok           -> ingest(r.body); sleep max(r.poll_interval, floor)
   when :not_modified -> sleep max(r.poll_interval_or_last_known, floor)
-  when :rate_limited -> sleep (r.retry_after || (r.rate.reset_at - now)) + jitter   # retry-after wins when present
+  when :rate_limited -> sleep RateWindow.clamp(r.retry_after || (r.rate.reset_at - now)) + jitter   # retry-after wins when present
   when :transient_error -> sleep backoff(attempt++)   # capped; never exit
 ```
 
 **Enrichment job (Phase 3):**
 ```
-return park(until: (budget.reset_at || now + 60) + jitter) unless client.budget.spendable?(reserve: 5)
+return park(until: now + RateWindow.clamp(budget.reset_at - now || 60) + jitter) unless client.budget.spendable?(reserve: 5)
 r = client.fetch_resource(record.url, etag: record.etag)
 case r.status
 when :ok            -> persist enrichment
 when :not_modified  -> touch fetched_at
-when :rate_limited  -> park(until: (r.retry_after ? now + r.retry_after : (r.rate.reset_at || now + 60)) + jitter)  # retry_after is a duration; reset_at an instant
+when :rate_limited  -> park(until: now + RateWindow.clamp(r.retry_after || (r.rate.reset_at - now) || 60) + jitter)  # retry_after is a duration; reset_at an instant
 when :not_found     -> mark not_found (terminal)
 when :rejected_url  -> mark rejected + security log (terminal)
 when :transient_error -> raise for Solid Queue retry (backoff, capped)
@@ -152,7 +156,10 @@ when :transient_error -> raise for Solid Queue retry (backoff, capped)
 - [ ] Sends UA / Accept / API-version headers on every request
 - [ ] `/events`: stores ETag from 200; sends it as `If-None-Match` on next poll
 - [ ] 200 with an ETag but an unparseable body → `:transient_error`, stored ETag not advanced
-- [ ] 304 → `:not_modified`; a header-less 304 leaves persisted `remaining` unchanged, while rate headers a 304 does carry are mirrored (observed live: 304s can arrive with a decremented remaining — docs/DECISIONS.md D-017)
+- [ ] 304 → `:not_modified`; a header-less 304 leaves persisted `remaining` unchanged, while rate headers a 304 does carry are mirrored (measured: unauthenticated 304s arrive with a decremented remaining — docs/DECISIONS.md D-017, D-022)
+- [ ] An ETag carrying a NUL, invalid UTF-8, or over 255 chars → `Result#etag` nil, stored ETag not advanced, no raise
+- [ ] `x-ratelimit-reset` outside years 2000–9999, or `x-ratelimit-remaining`/`x-poll-interval` outside PostgreSQL's `integer` → read as unknown, no raise
+- [ ] `RateWindow.clamp` bounds a wait to one hour and floors it at one second
 - [ ] Parses and exposes `x-poll-interval`
 - [ ] 200 updates persisted `remaining`/`reset_at`; visible via `budget`
 - [ ] 403 with remaining=0 → `:rate_limited` with correct `reset_at`
