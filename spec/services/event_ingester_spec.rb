@@ -327,4 +327,47 @@ RSpec.describe EventIngester do
       expect(logger.messages(:warn)).to be_empty
     end
   end
+
+  describe "enrichment enqueueing" do
+    let(:page) { GithubFixtures.json_body(:events_200) }
+    let(:push_count) { GithubFixtures.push_events.size }
+    let(:queuer) { instance_double(EnrichmentQueuer, call: nil) }
+
+    subject(:ingester) { described_class.new(logger: logger, queuer: queuer) }
+
+    it "hands every parsed-ok row to the queuer after persistence" do
+      ingester.ingest(page)
+
+      expect(queuer).to have_received(:call) do |rows|
+        expect(rows.size).to eq(push_count)
+        rows.each do |row|
+          expect(row[:structured]).to be_present
+          expect(row[:payload]).to be_a(Hash)
+        end
+      end
+    end
+
+    it "excludes parse-rejected events from enrichment" do
+      good = GithubFixtures.push_events.first
+      bad = GithubFixtures.push_events.second.deep_dup
+      bad["payload"]["head"] = "not-a-sha"
+
+      ingester.ingest([ good, bad ])
+
+      expect(queuer).to have_received(:call) do |rows|
+        expect(rows.map { |row| row[:github_event_id] }).to eq([ good["id"] ])
+      end
+    end
+
+    it "absorbs a queuer failure without touching the page's counts" do
+      allow(queuer).to receive(:call).and_raise(RuntimeError, "boom")
+
+      counts = ingester.ingest(page)
+
+      expect(counts).to eq(counts_with(events_seen: page.size, push_events_new: push_count))
+      expect(RawEvent.count).to eq(push_count)
+      expect(logger.messages(:error).first)
+        .to include(event: "enrich.enqueue_failed", error_class: "RuntimeError")
+    end
+  end
 end

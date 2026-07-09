@@ -27,8 +27,9 @@ class EventIngester
       structured_skipped: 0 }
   end
 
-  def initialize(logger: Rails.logger)
+  def initialize(logger: Rails.logger, queuer: EnrichmentQueuer.new)
     @logger = logger
+    @queuer = queuer
   end
 
   # events: the parsed body array from GithubClient::Result#body.
@@ -91,6 +92,7 @@ class EventIngester
     skipped.each do |skipped_id, reason|
       warn_ingest("ingest.structured_skipped", reason, detail: skipped_id)
     end
+    enqueue_enrichment(rows, result[:rejected_ids])
     { events_seen: events.size,
       push_events_new: result[:inserted],
       duplicates_skipped: candidates - result[:inserted] - result[:rejected_ids].size,
@@ -99,6 +101,25 @@ class EventIngester
   end
 
   private
+
+  # Enrichment is additive and strictly best-effort: by the time ingest
+  # runs, the client's ETag has advanced past this page, so raising here
+  # would report a fully persisted page as a poll failure. A missed enqueue
+  # self-heals — the firehose repeats entities and the TTL re-claims them
+  # (D-005). Deliberately outside the raw transaction: a stub failure must
+  # never cost raw persistence. Only parsed-ok rows whose raw row landed
+  # qualify — a rejected row's identity fields were never verified against
+  # a persisted event. The counts partition stays untouched; the queuer
+  # logs its own events.
+  def enqueue_enrichment(rows, rejected_ids)
+    eligible = rows.select do |row|
+      row[:structured] && !rejected_ids.include?(row[:github_event_id])
+    end
+    @queuer.call(eligible) if eligible.any?
+  rescue StandardError => e
+    @logger.error(component: "ingester", event: "enrich.enqueue_failed",
+                  error_class: e.class.name, message: e.message)
+  end
 
   def insert(rows)
     return { inserted: 0, rejected_ids: [] } if rows.empty?
