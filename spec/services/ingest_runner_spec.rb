@@ -132,22 +132,84 @@ RSpec.describe IngestRunner do
   end
 
   describe "resilience" do
-    it "logs an unexpected exception and keeps looping instead of exiting" do
+    # Network failures reach this loop as Result values, never exceptions
+    # (the client converts them), so the raised-exception policy below is
+    # about database errors and bugs (D-026).
+    let(:transient) { ActiveRecord::ConnectionNotEstablished.new("db unavailable") }
+
+    def new_runner(sleeper:)
+      described_class.new(client: client, ingester: ingester, sleeper: sleeper,
+                          clock: clock, logger: logger, jitter: -> { 0 }, traps: false)
+    end
+
+    it "backs off and keeps looping when the database drops for one cycle" do
       calls = 0
       allow(client).to receive(:poll_events) do
         calls += 1
-        raise "database hiccup" if calls == 1
+        raise transient if calls == 1
         ok_result
       end
       runner = nil
       sleeper = ->(_) { runner.instance_variable_set(:@shutdown, true) if calls >= 2 }
-      runner = described_class.new(client: client, ingester: ingester, sleeper: sleeper,
-                                   clock: clock, logger: logger, jitter: -> { 0 }, traps: false)
+      runner = new_runner(sleeper: sleeper)
       runner.run
 
       expect(logger.messages(:error))
-        .to contain_exactly(hash_including(event: "poll.error", message: "database hiccup"))
+        .to contain_exactly(hash_including(event: "poll.error",
+                                           error_class: "ActiveRecord::ConnectionNotEstablished",
+                                           consecutive: 1))
       expect(cycle_logs.last[:status]).to eq(:ok)
+    end
+
+    it "escalates a programming error immediately instead of absorbing it" do
+      allow(client).to receive(:poll_events).and_raise(NoMethodError, "undefined method 'oops'")
+      runner = new_runner(sleeper: ->(_) { raise "escalation must not sleep" })
+
+      expect { runner.run }.to raise_error(NoMethodError)
+      expect(logger.messages(:fatal))
+        .to contain_exactly(hash_including(event: "poll.escalated", reason: "permanent_error",
+                                           error_class: "NoMethodError"))
+    end
+
+    it "escalates once consecutive transient failures exhaust the cap" do
+      calls = 0
+      allow(client).to receive(:poll_events) { calls += 1; raise transient }
+      runner = nil
+      # The flag is a leash on the mutant that never escalates: past the cap
+      # it stops the loop so the missing raise fails this spec instead of
+      # hanging the suite.
+      sleeper = lambda do |_|
+        runner.instance_variable_set(:@shutdown, true) if calls > described_class::MAX_CONSECUTIVE_FAILURES
+      end
+      runner = new_runner(sleeper: sleeper)
+
+      expect { runner.run }.to raise_error(ActiveRecord::ConnectionNotEstablished)
+      expect(calls).to eq(described_class::MAX_CONSECUTIVE_FAILURES)
+      expect(logger.messages(:fatal))
+        .to contain_exactly(hash_including(event: "poll.escalated",
+                                           reason: "transient_failures_exhausted",
+                                           consecutive: described_class::MAX_CONSECUTIVE_FAILURES))
+    end
+
+    it "resets the consecutive counter after any completed cycle" do
+      # One below the cap, a success, one below the cap again: never
+      # escalates, pinning that the cap measures a streak, not a total —
+      # the mutant that stops resetting fails here on the doubled tally.
+      below_cap = described_class::MAX_CONSECUTIVE_FAILURES - 1
+      sequence = [ transient ] * below_cap + [ :ok ] + [ transient ] * below_cap + [ :ok ]
+      served = 0
+      allow(client).to receive(:poll_events) do
+        step = sequence[[ served, sequence.size - 1 ].min]
+        served += 1
+        step == :ok ? ok_result : raise(step)
+      end
+      runner = nil
+      sleeper = ->(_) { runner.instance_variable_set(:@shutdown, true) if served >= sequence.size }
+      runner = new_runner(sleeper: sleeper)
+
+      expect { runner.run }.not_to raise_error
+      expect(logger.messages(:fatal)).to be_empty
+      expect(logger.messages(:error).map { |entry| entry[:consecutive] }.max).to eq(below_cap)
     end
 
     it "logs a clean shutdown when the stop flag flips" do

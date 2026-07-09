@@ -1,7 +1,10 @@
 # Owns the cadence policy the client deliberately doesn't (docs/specs/
 # GITHUB-CLIENT.md § Caller Contracts): the client reports facts, this loop
-# decides how long to wait on each of them. In continuous mode it never
-# exits nonzero — a poll loop that crashes overnight ingests nothing.
+# decides how long to wait on each of them. Continuous mode absorbs and
+# backs off on transient failures — a poll loop that crashes overnight
+# ingests nothing — but it is not silent forever: a permanent error, or a
+# transient streak that outlives MAX_CONSECUTIVE_FAILURES, exits nonzero so
+# compose's restart policy can recycle the container (D-026).
 class IngestRunner
   DEFAULT_POLL_INTERVAL = 60
   # Never poll faster than this, even when X-Poll-Interval asks for it.
@@ -22,6 +25,23 @@ class IngestRunner
   # Sleep in short slices so SIGTERM is honored within ~1s of arriving,
   # comfortably inside compose's stop grace period.
   SLEEP_SLICE = 1
+
+  # What may raise out of a cycle is a database error or a bug — never the
+  # network, which the client converts to Result values. These are the
+  # database-availability shapes; anything else is treated as permanent and
+  # escalates immediately. StatementInvalid is here knowingly: a dead DB
+  # mid-statement surfaces as it, and its permanent look-alike (a bad
+  # migration) recurs identically every cycle, so the consecutive cap below
+  # is that case's terminal state (D-026).
+  TRANSIENT_ERRORS = [
+    ActiveRecord::ConnectionNotEstablished, # covers ConnectionFailed
+    ActiveRecord::ConnectionTimeoutError,
+    ActiveRecord::StatementInvalid          # covers Deadlocked, QueryCanceled, LockWaitTimeout
+  ].freeze
+  # ~20 min of capped backoff between first failure and escalation — longer
+  # than any routine db restart, short enough that an outage surfaces as a
+  # visible container restart instead of an evening of silence.
+  MAX_CONSECUTIVE_FAILURES = 10
 
   # One-shot mode raises this for any poll that isn't :ok/:not_modified so
   # verification runs exit nonzero (D-016) — Results are values, not
@@ -47,6 +67,7 @@ class IngestRunner
     @traps = traps
     @shutdown = false
     @attempt = 0
+    @consecutive_failures = 0
   end
 
   def run(once: false)
@@ -65,11 +86,20 @@ class IngestRunner
 
       begin
         wait, _result = cycle
+        # Any completed cycle proves the database answered, whatever the
+        # poll's Result said — the escalation counter measures a streak.
+        @consecutive_failures = 0
         interruptible_sleep(wait)
-      rescue StandardError => e
+      rescue *TRANSIENT_ERRORS => e
+        @consecutive_failures += 1
         @logger.error(component: "ingester", event: "poll.error",
-                      error_class: e.class.name, message: e.message)
+                      error_class: e.class.name, message: e.message,
+                      consecutive: @consecutive_failures)
+        escalate(e, "transient_failures_exhausted") if @consecutive_failures >= MAX_CONSECUTIVE_FAILURES
         interruptible_sleep(backoff)
+      rescue StandardError => e
+        # Not a database-availability shape: retrying re-runs the same bug.
+        escalate(e, "permanent_error")
       end
 
       if @shutdown
@@ -130,6 +160,18 @@ class IngestRunner
     wait = [ BACKOFF_BASE * (2**@attempt), BACKOFF_CAP ].min + @jitter.call
     @attempt = [ @attempt + 1, MAX_BACKOFF_ATTEMPT ].min
     wait
+  end
+
+  # Exiting nonzero is the escalation channel: compose's restart policy
+  # recycles the container, which is the replacement for the Phase 0
+  # boot-time SELECT 1 this loop's catch-all absorbed (D-026). The fatal
+  # line is the last thing this process says — it must carry everything an
+  # operator needs.
+  def escalate(error, reason)
+    @logger.fatal(component: "ingester", event: "poll.escalated", reason: reason,
+                  error_class: error.class.name, message: error.message,
+                  consecutive: @consecutive_failures)
+    raise error
   end
 
   def trap_signals
