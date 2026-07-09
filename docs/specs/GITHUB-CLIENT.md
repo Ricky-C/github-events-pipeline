@@ -53,7 +53,7 @@ Immutable value object. Exactly one `status` per call:
 
 `StorableString` judges a value's **bytes as UTF-8**, not the encoding its `String` happens to be tagged with: Net::HTTP hands header values back `ASCII-8BIT`, under which `valid_encoding?` is true of every byte sequence and `length` counts bytes rather than characters (D-025). A surviving `etag` is therefore returned re-tagged `UTF-8` — the tag that was checked is the tag the column receives.
 
-Convenience predicates: `ok?`, `not_modified?`, `rate_limited?`, `terminal?` (`:not_found` or `:rejected_url`), `retryable?` (`:transient_error`).
+Convenience predicates: `ok?`, `not_modified?`, `rate_limited?`, `terminal?` (`:not_found` or `:rejected_url`), `retryable?` (`:transient_error`). Plus `reset_at` (= `rate[:reset_at]`, nil-safe) — the one rate field callers act on, exposed so no call site re-derives the `rate` hash's shape (D-028).
 
 ### Budget
 
@@ -131,8 +131,8 @@ After **every** real (non-304-shortcut… i.e., every actual HTTP) response, inc
 | 404, 410 | `:not_found` |
 | 401 | `:transient_error` (should be impossible unauthenticated — log loudly) |
 | 5xx | `:transient_error` |
-| Timeout / ECONNREFUSED / DNS / SSL error | `:transient_error` |
-| 2xx with invalid JSON | `:transient_error` |
+| Timeout / any socket errno / DNS / SSL / malformed response (bad status line, truncated gzip) | `:transient_error` — `NETWORK_ERRORS` covers the transport surface by parent class (`SystemCallError`, `Zlib::Error`, `Net::ProtocolError`): an exception escaping the client reads as a bug to the poll loop and exits it (D-026, D-028) |
+| 2xx with invalid JSON | `:transient_error` (logs `body.unparseable` at warn — never the body bytes) |
 | 2xx body > 5 MB | `:transient_error` |
 
 ## Caller Contracts (for reference — implemented in Phases 1 & 3)
@@ -194,4 +194,4 @@ when :transient_error -> raise for Solid Queue retry (backoff, capped)
 
 ## Out of Scope for This Client
 
-Retry/backoff execution (callers), sleeping (callers), logging policy beyond returning data (callers log Results), payload interpretation (parser), persistence of domain records (services/jobs).
+Retry/backoff execution (callers), sleeping (callers), logging policy beyond returning data — callers log Results; the client warns only for what only it can see (`etag.unstorable`, `body.unparseable`, `auth.unexpected_401`) — payload interpretation (parser), persistence of domain records (services/jobs).
