@@ -42,13 +42,16 @@ class EnrichmentQueuer
       }
     end
 
-    actors.each_value { |attrs| upsert_and_enqueue(Actor, EnrichActorJob, attrs) }
-    repositories.each_value { |attrs| upsert_and_enqueue(Repository, EnrichRepositoryJob, attrs) }
+    actors.each_value { |attrs| upsert_and_enqueue(EnrichActorJob, attrs) }
+    repositories.each_value { |attrs| upsert_and_enqueue(EnrichRepositoryJob, attrs) }
   end
 
   private
 
-  def upsert_and_enqueue(model, job_class, attrs)
+  # The job names the model it enriches (`record_class`), so this method takes
+  # the job and derives the rest — one mapping, shared with EnrichmentSweep.
+  def upsert_and_enqueue(job_class, attrs)
+    model = job_class.record_class
     entity = model.model_name.singular
     attrs[:url] = checked_url(entity, attrs)
     if attrs.key?(:avatar_url) && !StorableString.valid?(attrs[:avatar_url], max: MAX_URL_LENGTH)

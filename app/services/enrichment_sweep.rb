@@ -25,7 +25,10 @@ class EnrichmentSweep
   # could have written.
   MAX_PARK = GithubClient::RateWindow::MAX_WAIT + EnrichmentFetcher::MAX_PARK_JITTER
 
-  ENTITIES = [ [ Actor, EnrichActorJob ], [ Repository, EnrichRepositoryJob ] ].freeze
+  # Each job already names the model it enriches, so `record_class` is the
+  # one entity-to-job mapping in the system and a second list cannot pair
+  # them differently.
+  ENTITIES = [ EnrichActorJob, EnrichRepositoryJob ].freeze
 
   def initialize(logger: Rails.logger, clock: Time)
     @logger = logger
@@ -33,14 +36,15 @@ class EnrichmentSweep
   end
 
   def call
-    swept = ENTITIES.sum { |model, job_class| sweep(model, job_class) }
+    swept = ENTITIES.sum { |job_class| sweep(job_class) }
     @logger.info(component: "worker", event: "enrich.sweep", swept: swept)
     swept
   end
 
   private
 
-  def sweep(model, job_class)
+  def sweep(job_class)
+    model = job_class.record_class
     jobs = unfinished_jobs_by_record(job_class)
     return 0 if jobs.nil?
 
