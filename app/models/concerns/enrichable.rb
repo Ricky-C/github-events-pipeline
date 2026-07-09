@@ -3,7 +3,8 @@
 #   pending  → enqueued            (queuer wins the claim)
 #   enqueued → fetched             (job: 200 or 304)
 #            | not_found           (job: 404 — terminal, never retried)
-#            | rejected            (job: SSRF guard refusal — terminal)
+#            | rejected            (job: SSRF guard refusal, or a 200 whose
+#                                   body is not a JSON object — terminal)
 #            | pending             (job gives up on transients; re-claimable)
 #   fetched  → enqueued            (claim again once the TTL has expired)
 #

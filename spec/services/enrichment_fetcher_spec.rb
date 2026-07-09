@@ -262,6 +262,45 @@ RSpec.describe EnrichmentFetcher do
     end
   end
 
+  # /users and /repos answer with JSON objects. A 200 carrying anything else
+  # is not enrichment data, and persisting it would store a scalar under
+  # `data`, mark the record `fetched`, and let the 24h TTL hide the anomaly
+  # for a day. Refuse before persist — terminal, like any other unusable
+  # response (D-025).
+  describe "a non-object 200 body" do
+    {
+      "an array" => [ "[]", "Array" ],
+      "a string" => [ '"octocat"', "String" ],
+      "a number" => [ "123", "Integer" ],
+      "null" => [ "null", "NilClass" ]
+    }.each do |description, (body, body_class)|
+      it "rejects #{description} without storing it" do
+        stub_request(:get, user_url)
+          .to_return(status: 200, headers: { "etag" => 'W/"b1"' }, body: body)
+
+        outcome = fetcher.call(actor)
+
+        expect(outcome.action).to eq(:done)
+        actor.reload
+        expect(actor.fetch_status).to eq("rejected")
+        expect(actor.data).to be_nil
+        expect(actor.etag).to be_nil
+        expect(actor.fetched_at).to be_nil
+        expect(entry(:warn, "enrich.rejected"))
+          .to include(entity: "actor", github_id: 583231,
+                      reason: "non_object_body", body_class: body_class)
+      end
+    end
+
+    it "settles the entity for good — it is never claimed again" do
+      stub_request(:get, user_url).to_return(status: 200, body: "[]")
+
+      fetcher.call(actor)
+
+      expect(Actor.claim_for_enrichment(actor.github_id)).to be(false)
+    end
+  end
+
   describe "hostile enrichment body" do
     it "persists a scrubbed, marked copy when the body is unstorable" do
       # \x5C = backslash: the JSON escape for NUL, spelled without putting

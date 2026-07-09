@@ -66,8 +66,23 @@ class EnrichmentFetcher
   end
 
   def persist(record, result)
+    return reject_body(record, result.body) unless result.body.is_a?(Hash)
+
     update_fetched(record, data: result.body, etag: result.etag)
     log(:info, "enrich.success", record, not_modified: false)
+    done
+  end
+
+  # /users and /repos answer with JSON objects; a 200 carrying an array or a
+  # scalar is not enrichment data. Stored, it would put a bare value under
+  # `data`, mark the record `fetched`, and let the 24h TTL hide the anomaly
+  # for a day — and it is the one input that reaches the scrub path below as
+  # something it cannot mark. Terminal, like any other unusable response.
+  # Warn, not error: a data-shape anomaly upstream, not a guard catching an
+  # attack — the same register as enrich.scrubbed (D-025).
+  def reject_body(record, body)
+    record.update!(fetch_status: "rejected")
+    log(:warn, "enrich.rejected", record, reason: "non_object_body", body_class: body.class.name)
     done
   end
 
@@ -136,9 +151,10 @@ class EnrichmentFetcher
     raise unless save[:data] && JsonScrubber.data_shaped?(error)
     # A hostile profile field (NUL, invalid bytes) would otherwise leave the
     # record cycling claim → fail → release forever. Same trade as ingest
-    # (D-018): a scrubbed-and-marked copy over no enrichment at all.
-    scrubbed = JsonScrubber.scrub_unstorable(save[:data])
-    scrubbed = scrubbed.merge("payload_scrubbed" => true) if scrubbed.is_a?(Hash)
+    # (D-018): a scrubbed-and-marked copy over no enrichment at all. `persist`
+    # refuses every non-object body, so the data here is always a Hash and the
+    # marker always lands — an unmarked scrubbed copy would be a forgery.
+    scrubbed = JsonScrubber.scrub_unstorable(save[:data]).merge("payload_scrubbed" => true)
     record.class.transaction(requires_new: true) { record.update!(save.merge(data: scrubbed)) }
     log(:warn, "enrich.scrubbed", record, error_class: error.class.name)
   end
