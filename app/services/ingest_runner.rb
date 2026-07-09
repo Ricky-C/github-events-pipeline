@@ -6,6 +6,9 @@
 # transient streak that outlives MAX_CONSECUTIVE_FAILURES, exits nonzero so
 # compose's restart policy can recycle the container (D-026).
 class IngestRunner
+  include StructuredLogging
+  self.log_component = "ingester"
+
   DEFAULT_POLL_INTERVAL = 60
   # Never poll faster than this, even when X-Poll-Interval asks for it.
   # Conditional polls are not free: measured 304s decrement
@@ -92,9 +95,8 @@ class IngestRunner
         interruptible_sleep(wait)
       rescue *TRANSIENT_ERRORS => e
         @consecutive_failures += 1
-        @logger.error(component: "ingester", event: "poll.error",
-                      error_class: e.class.name, message: e.message,
-                      consecutive: @consecutive_failures)
+        log_event(:error, "poll.error", error_class: e.class.name, message: e.message,
+                                        consecutive: @consecutive_failures)
         escalate(e, "transient_failures_exhausted") if @consecutive_failures >= MAX_CONSECUTIVE_FAILURES
         interruptible_sleep(backoff)
       rescue StandardError => e
@@ -103,7 +105,7 @@ class IngestRunner
       end
 
       if @shutdown
-        @logger.info(component: "ingester", event: "shutdown.clean")
+        log_event(:info, "shutdown.clean")
         break
       end
     end
@@ -122,16 +124,13 @@ class IngestRunner
       # is the system working as designed, and an operator scanning logs
       # must be able to tell that apart from an error without decoding
       # cycle fields. The README's verify section points at this event.
-      @logger.info(component: "ingester", event: "poll.rate_limited",
-                   reset_at: result.rate&.fetch(:reset_at, nil),
-                   retry_after: result.retry_after, sleep_for: wait)
+      log_event(:info, "poll.rate_limited", reset_at: result.rate&.fetch(:reset_at, nil),
+                                            retry_after: result.retry_after, sleep_for: wait)
     end
 
-    @logger.info({
-      component: "ingester", event: "poll.cycle", status: result.status,
-      not_modified: result.not_modified?,
-      budget_remaining: @client.budget.remaining, sleep_for: wait
-    }.merge(counts))
+    log_event(:info, "poll.cycle", status: result.status, not_modified: result.not_modified?,
+                                   budget_remaining: @client.budget.remaining, sleep_for: wait,
+                                   **counts)
 
     [ wait, result ]
   end
@@ -178,9 +177,9 @@ class IngestRunner
   # line is the last thing this process says — it must carry everything an
   # operator needs.
   def escalate(error, reason)
-    @logger.fatal(component: "ingester", event: "poll.escalated", reason: reason,
-                  error_class: error.class.name, message: error.message,
-                  consecutive: @consecutive_failures)
+    log_event(:fatal, "poll.escalated", reason: reason,
+                                        error_class: error.class.name, message: error.message,
+                                        consecutive: @consecutive_failures)
     raise error
   end
 

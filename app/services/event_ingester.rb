@@ -7,6 +7,9 @@
 # rejects still lands raw; only its structured projection is skipped, and
 # that skip is warned only once the raw row's fate is known (D-020, D-021).
 class EventIngester
+  include StructuredLogging
+  self.log_component = "ingester"
+
   # Real GitHub event ids are ~11-digit numeric strings; 64 chars is
   # generous headroom while still bounding what payload-derived data can
   # reach an indexed column (docs/THREAT-MODEL.md length validation).
@@ -117,8 +120,7 @@ class EventIngester
     end
     @queuer.call(eligible) if eligible.any?
   rescue StandardError => e
-    @logger.error(component: "ingester", event: "enrich.enqueue_failed",
-                  error_class: e.class.name, message: e.message)
+    log_event(:error, "enrich.enqueue_failed", error_class: e.class.name, message: e.message)
   end
 
   def insert(rows)
@@ -194,6 +196,6 @@ class EventIngester
   def warn_ingest(event, reason, detail:)
     # Never the payload itself at this level (CLAUDE.md logging rules) —
     # reason + truncated identifying detail is enough to investigate.
-    @logger.warn(component: "ingester", event: event, reason: reason, detail: detail)
+    log_event(:warn, event, reason: reason, detail: detail)
   end
 end

@@ -5,6 +5,9 @@ require "net/http"
 # returns facts as Result values; callers make all policy — it never sleeps,
 # never retries, and never raises for expected outcomes.
 class GithubClient
+  include StructuredLogging
+  self.log_component = "github_client"
+
   API_HOST = "api.github.com"
   EVENTS_URL = "https://#{API_HOST}/events".freeze
   VERSION = "0.1"
@@ -193,8 +196,8 @@ class GithubClient
     when 401
       # Impossible without an auth header, and this project must never have
       # one — log loudly per spec so a stray credential is caught fast.
-      Rails.logger.error(component: "github_client", event: "auth.unexpected_401",
-                         msg: "401 from an unauthenticated request — check for a stray auth header")
+      log_event(:error, "auth.unexpected_401",
+                msg: "401 from an unauthenticated request — check for a stray auth header")
       Result.new(status: :transient_error, error: "unexpected 401", rate: rate)
     else
       Result.new(status: :transient_error, error: "HTTP #{status}", rate: rate)
@@ -220,8 +223,7 @@ class GithubClient
     return etag if StorableString.valid?(etag, max: MAX_ETAG_LENGTH)
 
     # Never the header bytes themselves: they are why this line exists.
-    Rails.logger.warn(component: "github_client", event: "etag.unstorable",
-                      bytesize: header.bytesize)
+    log_event(:warn, "etag.unstorable", bytesize: header.bytesize)
     nil
   end
 

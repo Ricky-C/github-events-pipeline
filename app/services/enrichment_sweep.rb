@@ -13,6 +13,9 @@
 # re-claimed. Dead-letter rows are left alone — they are the operator's record
 # of what happened (docs/DECISIONS.md D-024).
 class EnrichmentSweep
+  include StructuredLogging
+  self.log_component = "worker"
+
   # Solid Queue owns recovery for the moments after a crash, and an enqueue is
   # visible the instant its claim commits. A record younger than this is
   # in-flight, not stranded.
@@ -37,7 +40,7 @@ class EnrichmentSweep
 
   def call
     swept = ENTITIES.sum { |job_class| sweep(job_class) }
-    @logger.info(component: "worker", event: "enrich.sweep", swept: swept)
+    log_event(:info, "enrich.sweep", swept: swept)
     swept
   end
 
@@ -74,8 +77,8 @@ class EnrichmentSweep
   end
 
   def log_abort(job)
-    @logger.error(component: "worker", event: "enrich.sweep_aborted",
-                  class_name: job.class_name, solid_queue_job_id: job.id)
+    log_event(:error, "enrich.sweep_aborted", class_name: job.class_name,
+                                              solid_queue_job_id: job.id)
     nil
   end
 
@@ -132,7 +135,7 @@ class EnrichmentSweep
   end
 
   def log(record, **fields)
-    @logger.warn({ component: "worker", event: "enrich.swept",
-                   entity: record.model_name.singular, github_id: record.github_id }.merge(fields))
+    log_event(:warn, "enrich.swept", entity: record.model_name.singular,
+                                     github_id: record.github_id, **fields)
   end
 end

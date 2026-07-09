@@ -1,6 +1,9 @@
 # Mechanics-only shell over EnrichmentFetcher (CLAUDE.md: jobs stay thin —
 # every decision lives in the service). Subclasses supply record_class.
 class EnrichmentJob < ApplicationJob
+  include StructuredLogging
+  self.log_component = "worker"
+
   queue_as :enrichment
 
   # A :transient_error Result surfaces as an exception on purpose: Active
@@ -46,9 +49,8 @@ class EnrichmentJob < ApplicationJob
   def give_up(error)
     id = arguments.first
     self.class.record_class.release_claim(id)
-    Rails.logger.error(component: "worker", event: "enrich.retry_exhausted",
-                       job: self.class.name, record_id: id,
-                       error_class: error.class.name, message: error.message)
+    log_event(:error, "enrich.retry_exhausted", job: self.class.name, record_id: id,
+                                                error_class: error.class.name, message: error.message)
   end
 
   def self.record_class
