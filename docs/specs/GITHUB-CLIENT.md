@@ -167,7 +167,8 @@ when :transient_error -> raise for Solid Queue retry (backoff, capped)
 - [ ] `/events`: stores ETag from 200; sends it as `If-None-Match` on next poll
 - [ ] 200 with an ETag but an unparseable body → `:transient_error`, stored ETag not advanced
 - [ ] 304 → `:not_modified`; a header-less 304 leaves persisted `remaining` unchanged, while rate headers a 304 does carry are mirrored (measured: unauthenticated 304s arrive with a decremented remaining — docs/DECISIONS.md D-017, D-022)
-- [ ] An ETag carrying a NUL, invalid UTF-8, or over 255 chars → `Result#etag` nil, stored ETag not advanced, no raise
+- [ ] An ETag carrying a NUL, invalid UTF-8, or over 255 chars → `Result#etag` nil, stored ETag not advanced, no raise — including the `ASCII-8BIT`-tagged header Net::HTTP actually delivers, where `valid_encoding?` is vacuously true
+- [ ] A surviving ETag is returned tagged `UTF-8`, not `ASCII-8BIT`: the value the predicate judged is the value the caller persists
 - [ ] `x-ratelimit-reset` outside years 2000–9999, or `x-ratelimit-remaining`/`x-poll-interval` outside PostgreSQL's `integer` → read as unknown, no raise
 - [ ] `RateWindow.clamp` bounds a wait to one hour and floors it at one second
 - [ ] `RateWindow.wait` precedence: `retry_after` beats a future `reset_at`; a future `reset_at` beats the fallback; a past `reset_at` and a missing one both take the fallback; `Retry-After: 0` floors to one second
@@ -181,6 +182,8 @@ when :transient_error -> raise for Solid Queue retry (backoff, capped)
 - [ ] Oversized body still mirrors the response's rate headers
 - [ ] Numeric headers parse as base 10 (a leading zero is not octal)
 - [ ] URL guard allow/deny table: `https://api.github.com/users/x` ✓; `http://api.github.com/...` ✗; `https://api.github.com.evil.com/...` ✗; `https://evil.com/...` ✗; `https://api.github.com:8443/...` ✗; `https://user@api.github.com/...` ✗; IP literal ✗ — all deny cases make **zero** HTTP requests
+- [ ] URL guard escapes raw brackets (`.../users/github-actions[bot]`) and the **escaped** URL is what gets requested; an already-escaped URL passes through unchanged (no `%255B`)
+- [ ] `spendable?` escapes a stale mirror: `remaining: 0` with a `reset_at` at or before `at:` → true; still-open window → false; no `reset_at` observed → false
 - [ ] 301 followed once when target passes guard; second 301 → `:transient_error`; guarded-out target → `:rejected_url`
 - [ ] Relative 301 `Location` resolved against the request URI and followed
 - [ ] `budget.unknown?` true before any response; false after
