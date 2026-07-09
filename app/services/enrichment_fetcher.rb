@@ -1,0 +1,152 @@
+# Makes every enrichment decision for one claimed Actor/Repository — budget
+# gate, conditional fetch, Result-to-state-machine mapping, persistence —
+# and returns a plain Outcome value; EnrichmentJob translates that into
+# Active Job mechanics. Split from the job so the policy is unit-testable
+# without a queue (CLAUDE.md: jobs stay thin).
+class EnrichmentFetcher
+  # Enrichment never spends the window down to zero: polling has priority
+  # (D-006) and the persisted mirror can lag a few requests behind reality
+  # (a desynced shard was observed live — D-022), so a small reserve keeps
+  # the poller from ever being starved by enrichment.
+  ENRICHMENT_RESERVE = 5
+
+  # Parking before any reset_at has been observed (rate-limited at boot):
+  # a short blind wait beats guessing at the window.
+  PARK_FALLBACK = 60
+
+  # De-synchronizes parked jobs from the ingester's own reset wake-up so a
+  # fresh window doesn't open with simultaneous requests.
+  MAX_PARK_JITTER = 30
+
+  # :done — the record reached a settled state (fetched/not_found/rejected).
+  # :parked — budget or rate limit; re-enqueue a fresh job at run_at.
+  # :retry — transient fetch failure; raise so retry_on owns the backoff.
+  Outcome = Data.define(:action, :run_at, :error) do
+    def initialize(action:, run_at: nil, error: nil) = super
+  end
+
+  def initialize(client: GithubClient.new, logger: Rails.logger, clock: Time,
+                 jitter: -> { rand(0..MAX_PARK_JITTER) })
+    @client = client
+    @logger = logger
+    @clock = clock
+    @jitter = jitter
+  end
+
+  def call(record)
+    budget = @client.budget
+    unless spendable?(budget)
+      return park(record, reason: "budget", reset_at: budget.reset_at)
+    end
+
+    result = @client.fetch_resource(record.url, etag: record.etag)
+    case result.status
+    when :ok then persist(record, result)
+    when :not_modified then revalidate(record)
+    when :not_found then terminal(record)
+    when :rejected_url then reject(record, result)
+    when :rate_limited
+      park(record, reason: "rate_limited", retry_after: result.retry_after,
+           reset_at: result.rate&.fetch(:reset_at, nil))
+    else
+      retry_later(record, result)
+    end
+  end
+
+  private
+
+  # The reserve check alone would deadlock after exhaustion: nothing
+  # refreshes the mirror until some request is made, so a stale
+  # "remaining: 0" would park every job forever (or hot-loop them at a
+  # past reset_at). Once the observed window has rolled, act optimistically —
+  # the first fetch refreshes the mirror either way.
+  def spendable?(budget)
+    budget.spendable?(reserve: ENRICHMENT_RESERVE) ||
+      (budget.reset_at.present? && budget.reset_at <= @clock.now)
+  end
+
+  def persist(record, result)
+    update_fetched(record, data: result.body, etag: result.etag)
+    log(:info, "enrich.success", record, not_modified: false)
+    done
+  end
+
+  # 304: the stored data is still current — touch fetched_at so the TTL
+  # window restarts, leave data and etag exactly as they were.
+  def revalidate(record)
+    update_fetched(record)
+    log(:info, "enrich.success", record, not_modified: true)
+    done
+  end
+
+  # Deleted users/repos are routine in the public firehose: terminal state,
+  # never retried, never re-claimable (D-005 lineage; phase plan).
+  def terminal(record)
+    record.update!(fetch_status: "not_found")
+    log(:info, "enrich.terminal", record, reason: "not_found")
+    done
+  end
+
+  # The client refused the stored URL pre-flight (or a redirect target) —
+  # zero requests were made. Terminal, with the security log the threat
+  # model requires for every guard refusal.
+  def reject(record, result)
+    record.update!(fetch_status: "rejected")
+    log(:error, "security.url_rejected", record, reason: result.error)
+    done
+  end
+
+  # The record deliberately stays enqueued while parked: that is the
+  # in-flight dedup — later events for the same entity skip enqueueing
+  # while this job waits out the window.
+  def park(record, reason:, retry_after: nil, reset_at: nil)
+    run_at = park_at(retry_after: retry_after, reset_at: reset_at)
+    log(:info, "enrich.parked", record, reason: reason, run_at: run_at.iso8601)
+    Outcome.new(action: :parked, run_at: run_at)
+  end
+
+  # Retry-After wins when present (a secondary limit's short wait vs the
+  # primary bucket's far-off reset — same reasoning as IngestRunner); a
+  # reset_at already in the past must not become a zero-wait hot loop.
+  def park_at(retry_after:, reset_at:)
+    now = @clock.now
+    base =
+      if retry_after
+        now + retry_after
+      elsif reset_at && reset_at > now
+        reset_at
+      else
+        now + PARK_FALLBACK
+      end
+    [ base, now + 1 ].max + @jitter.call
+  end
+
+  def retry_later(record, result)
+    log(:warn, "enrich.retry", record, status: result.status, error: result.error)
+    Outcome.new(action: :retry, error: "#{result.status} #{result.error}".strip)
+  end
+
+  def update_fetched(record, **attrs)
+    save = { fetched_at: @clock.now, fetch_status: "fetched", **attrs }
+    # Savepoint: a PG refusal must not abort a wrapping transaction —
+    # the transactional test suite, or any future caller's (D-018).
+    record.class.transaction(requires_new: true) { record.update!(save) }
+  rescue *JsonScrubber::ROW_ERRORS => error
+    raise unless save[:data] && JsonScrubber.data_shaped?(error)
+    # A hostile profile field (NUL, invalid bytes) would otherwise leave the
+    # record cycling claim → fail → release forever. Same trade as ingest
+    # (D-018): a scrubbed-and-marked copy over no enrichment at all.
+    scrubbed = JsonScrubber.scrub_unstorable(save[:data])
+    scrubbed = scrubbed.merge("payload_scrubbed" => true) if scrubbed.is_a?(Hash)
+    record.class.transaction(requires_new: true) { record.update!(save.merge(data: scrubbed)) }
+    log(:warn, "enrich.scrubbed", record, error_class: error.class.name)
+  end
+
+  def done = Outcome.new(action: :done)
+
+  def log(level, event, record, **fields)
+    @logger.public_send(level, { component: "worker", event: event,
+                                 entity: record.model_name.singular,
+                                 github_id: record.github_id }.merge(fields))
+  end
+end
