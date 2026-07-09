@@ -54,7 +54,7 @@ Modeling decisions (full rationale in `docs/DECISIONS.md`):
 
 - **Raw + structured, not raw + views.** Real columns give plain-SQL access (the story's requirement), honest indexes, and schema-as-documentation. Raw jsonb is retained for audit/replay — structured tables are rebuildable from raw.
 - **Enrichment is additive.** Stub actor/repo rows are created from payload data at ingest; enrichment fills them in later. Push events are immediately queryable with ids/logins even before (or without) enrichment.
-- **`fetch_status` is a small state machine** (`pending → enqueued → fetched | not_found | rejected`, back to `pending` on retry exhaustion; `fetched` re-claims after the 24h TTL) so in-flight dedup and terminal failures are data, not retries (D-023).
+- **`fetch_status` is a small state machine** (`pending → enqueued → fetched | not_found | rejected`, back to `pending` on retry exhaustion or when `EnrichmentSweep` finds an `enqueued` record whose job died; `fetched` re-claims after the 24h TTL) so in-flight dedup and terminal failures are data, not retries (D-023, D-024).
 
 ## Idempotency & Restart Safety (Extension B)
 
@@ -62,7 +62,7 @@ Assume every operation can be interrupted and replayed:
 
 - All externally-keyed writes are upserts against unique indexes (`ON CONFLICT DO NOTHING`/`DO UPDATE`)
 - Raw + structured writes share one transaction — no torn events
-- Job state lives in Postgres (Solid Queue): worker restarts resume, not duplicate
+- Job state lives in Postgres (Solid Queue), so a worker restart resumes rather than forgets. Delivery is at-least-once, not exactly-once: a graceful restart mid-fetch re-runs the job (one wasted request; every persist is an idempotent `update!`), and a *hard* kill dead-letters the claimed execution rather than re-running it, which `EnrichmentSweep` reconciles (D-024)
 - Poll ETag persistence means a restarted ingester doesn't re-download an unchanged page
 - Growth is bounded: events are append-only facts; actors/repos are upserted (one row per entity, ever); TTL bounds fetch frequency
 
@@ -71,7 +71,8 @@ Assume every operation can be interrupted and replayed:
 | Failure | Behavior |
 |---|---|
 | 304 Not Modified | Log `not_modified`, no body to ingest, sleep floored poll interval (budget is decremented like any request — D-022) |
-| 403 / 429 | Sleep until `reset_at` + jitter; enrichment jobs park |
+| 403 / 429 | Sleep until `reset_at` + jitter; enrichment jobs park. Every such wait is clamped to the one-hour rate window — a header asking for longer is a desynced shard, not an instruction (D-024) |
+| Worker hard-killed mid-fetch | Solid Queue dead-letters the claimed execution; `EnrichmentSweep` releases the record and re-claims it within one sweep interval (D-024) |
 | 404 (actor/repo) | Mark `not_found`, never retry |
 | 5xx / timeout / DNS | Exponential backoff, capped attempts, then skip-and-log |
 | Malformed payload | Persist raw, skip structured, warn — never raise |
@@ -81,13 +82,13 @@ Assume every operation can be interrupted and replayed:
 
 ## Observability
 
-One JSON object per line to stdout/stderr (`docker compose logs -f` is the operator UI). Canonical events: `poll.cycle`, `poll.rate_limited`, `enrich.enqueued|cache_hit|skipped|success|parked|retry|retry_exhausted|terminal|scrubbed|enqueue_failed`, `ingest.malformed`, `ingest.structured_skipped`, `security.url_rejected`. Every log carries `ts`, `level`, `component`, `event`; counts over one poll cycle reconcile (seen = new + duplicates + non-push + malformed; `structured_skipped` is an overlay on top of that partition, not a term in it — see D-020/D-021).
+One JSON object per line to stdout/stderr (`docker compose logs -f` is the operator UI). Canonical events: `poll.cycle`, `poll.rate_limited`, `enrich.enqueued|cache_hit|skipped|success|parked|retry|retry_exhausted|terminal|scrubbed|enqueue_failed|sweep|swept`, `ingest.malformed`, `ingest.structured_skipped`, `security.url_rejected`, `etag.unstorable`. Every log carries `ts`, `level`, `component`, `event`; counts over one poll cycle reconcile (seen = new + duplicates + non-push + malformed; `structured_skipped` is an overlay on top of that partition, not a term in it — see D-020/D-021).
 
 ## Technology Choices (summary — details in docs/DECISIONS.md)
 
 | Choice | Over | Because |
 |---|---|---|
 | Rails 8 API-only | Sinatra/plain Ruby | Exercise preference; migrations, jobs, testing conventions for free |
-| Solid Queue | Sidekiq + Redis | One stateful dependency; queue durability = DB durability; restart safety for free |
-| Polling + ETag | Webhooks | No public endpoint needed; fits "runs unattended locally"; 304s make it cheap |
+| Solid Queue | Sidekiq + Redis | One stateful dependency; queue durability = DB durability; restart safety modulo a reconciling sweep (D-024) |
+| Polling + ETag | Webhooks | No public endpoint needed; fits "runs unattended locally"; 304s save bandwidth, not budget (D-022) |
 | Postgres jsonb for raw | Object storage | One system of record at this scale; Extension C consciously skipped |

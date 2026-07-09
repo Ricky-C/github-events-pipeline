@@ -34,7 +34,11 @@ class EnrichmentJob < ApplicationJob
     raise
   rescue StandardError
     # An error retry_on doesn't manage would otherwise strand the record in
-    # enqueued forever — nothing re-runs a failed execution on its own.
+    # enqueued forever — nothing re-runs a failed execution on its own. This
+    # assumes the error was transient: a deterministic one re-runs on the next
+    # claim, with no equivalent of the attempts cap above (accepted, D-024).
+    # It can only run while this process lives; a hard kill takes the record
+    # with it, which is what EnrichmentSweep exists to reconcile.
     self.class.record_class.release_claim(id)
     raise
   end

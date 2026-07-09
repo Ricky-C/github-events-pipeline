@@ -60,13 +60,21 @@ services:
         condition: service_completed_successfully
     restart: unless-stopped
 
-  # Solid Queue supervisor (dispatcher + one enrichment worker, per
-  # config/queue.yml). Its default 5s shutdown timeout sits inside compose's
-  # 10s stop grace: an in-flight job finishes or its claimed execution is
-  # released and re-dispatched on restart.
+  # Solid Queue supervisor (dispatcher + one enrichment worker + the sweep
+  # scheduler, per config/queue.yml and config/recurring.yml).
+  #
+  # The two timeouts are ordered on purpose. A SIGTERMed worker fork releases
+  # its claimed execution only if it deregisters before the supervisor
+  # SIGQUITs it; lose that race and the execution is dead-lettered, which
+  # loses the enrichment. So the fork gets 20s (config/application.rb) —
+  # longer than a worst-case 15s fetch — and compose must not SIGKILL the
+  # supervisor before then, which its 10s default would. A hard kill
+  # (SIGKILL, OOM) still strands the claim; EnrichmentSweep recovers it
+  # (docs/DECISIONS.md D-024).
   worker:
     <<: *app
     command: ["bin/jobs"]
+    stop_grace_period: 25s
     depends_on:
       migrate:
         condition: service_completed_successfully

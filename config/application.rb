@@ -58,11 +58,13 @@ module GithubEventsPipeline
     # that absence is deliberate, not an omission.
     config.active_job.queue_adapter = :solid_queue
 
-    # The enrichment claim UPDATE and its job INSERT must commit or roll
-    # back together in one transaction on the one database (docs/DECISIONS.md
-    # D-023); deferring enqueue to after-commit would reopen the
-    # crashed-between-claim-and-enqueue window. false is the 8.1 default —
-    # pinned because the claim's atomicity silently depends on it.
-    config.active_job.enqueue_after_transaction_commit = false
+    # Longer than a worst-case fetch (GithubClient OPEN_TIMEOUT + READ_TIMEOUT
+    # = 15s). The worker fork waits this long for its job before deregistering
+    # — which *releases* the claimed execution — while the supervisor waits the
+    # same interval before SIGQUITing it, which strands the claim in the
+    # dead-letter table instead. At the 5s default the two race and an ordinary
+    # `docker compose restart worker` mid-fetch loses the enrichment
+    # (docs/DECISIONS.md D-024). Give the fork room to win.
+    config.solid_queue.shutdown_timeout = 20.seconds
   end
 end

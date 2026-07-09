@@ -1,6 +1,7 @@
-# Solid Queue process topology. The dispatcher is required even with no
-# recurring tasks: parked and retried jobs are scheduled_executions until a
-# dispatcher promotes them to ready_executions.
+# Solid Queue process topology. The dispatcher is not optional: parked and
+# retried jobs are scheduled_executions until a dispatcher promotes them to
+# ready_executions. The scheduler that fires EnrichmentSweepJob starts itself
+# from config/recurring.yml and needs no entry here.
 #
 # Worker concurrency is deliberately 1 (threads AND processes): enrichment
 # spends the shared 60/hr rate budget, and serializing spend keeps it
