@@ -31,6 +31,7 @@
   - [x] `404` → mark `fetch_status: not_found`, never retry (deleted users/repos are routine in the public firehose)
   - [x] `5xx`/timeouts → retry with exponential backoff, capped attempts, then discard with error log (claim released to `pending`)
 - [x] Budget allocation decision recorded in `docs/DECISIONS.md` (D-022: 304s cost budget, poll floor 120s ⇒ ~30 polls/hr, enrichment takes the remainder above a reserve of 5)
+- [x] **`EnrichmentSweep`** (post-review, D-024): Solid Queue *dead-letters* the claimed execution of a hard-killed worker rather than re-running it, stranding the record at `enqueued` forever. A 15-minute recurring job releases and re-claims any `enqueued` record with no live job; `shutdown_timeout` (20s) is raised above the worst-case fetch (15s) so a *graceful* restart releases the claim instead of racing to dead-letter it.
 
 ## Exit Criteria
 
@@ -45,6 +46,8 @@
 Avatar downloads / object storage (Extension C — intentionally not built). Final log schema (Phase 4).
 
 ## Notes / Discovered Work
+
+- (post-review, D-024) The review round found three defects, two of them wrong in the decision record itself: D-023's "Solid Queue's process recovery re-runs it" is false (it dead-letters), `etag` was the one externally-sourced string reaching a column without `StorableString`, and `park_at`/`until_reset` clamped only their lower bound. `config.active_job.enqueue_after_transaction_commit` also turned out to be a no-op at application level in Rails 8.1 — the pin now lives on `ApplicationJob`.
 
 - (from Phase 2) `push_events` deliberately carries no actor/repo URL columns (D-020): the enrichment enqueue reads URLs from the in-memory event payload at ingest time per the Tasks list, or joins `raw_events.payload` for backfill. Every payload-sourced URL passes UrlGuard regardless of where it was read from.
 - D-017 re-measured at phase start (D-022): 304s **do** decrement the unauthenticated budget, so the poll floor was stretched to 120s before any enrichment code landed.
