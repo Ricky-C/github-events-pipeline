@@ -4,8 +4,13 @@
 # exits nonzero — a poll loop that crashes overnight ingests nothing.
 class IngestRunner
   DEFAULT_POLL_INTERVAL = 60
-  # Never poll faster than this even if X-Poll-Interval is absent or zero.
-  POLL_FLOOR = 10
+  # Never poll faster than this, even when X-Poll-Interval asks for it.
+  # Conditional polls are not free: measured 304s decrement
+  # X-RateLimit-Remaining (D-017, D-022), so honoring the served 60s
+  # interval would spend the entire 60/hr budget on polling and starve
+  # enrichment. 120s caps polling at ~30 req/hr; a served interval larger
+  # than the floor still wins.
+  POLL_FLOOR = 120
   BACKOFF_BASE = 5
   BACKOFF_CAP = 300
   # 5 * 2**7 already exceeds the cap; clamping keeps a weeks-long outage
