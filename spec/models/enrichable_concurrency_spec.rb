@@ -127,9 +127,9 @@ RSpec.describe "enrichment claim atomicity", type: :model do
   # inline enqueue from a deferred one — an after_commit enqueue also leaves no
   # job row behind a rollback, while opening exactly the window D-023 closes
   # (claim committed, job not yet inserted). The knob it pins is the job
-  # class's `enqueue_after_transaction_commit`; Rails 8.1's Active Job railtie
-  # deliberately excludes that key from the application-level config it applies
-  # to ActiveJob::Base, so nothing but this example guards the default.
+  # class's `enqueue_after_transaction_commit`, set on ApplicationJob because
+  # Rails 8.1's Active Job railtie excludes that key from the application-level
+  # config it applies to ActiveJob::Base (D-024). This example is its guard.
   it "inserts the job row inside the claim transaction and rolls both back together" do
     actor = existing_actor
     enqueued_before_commit = nil
