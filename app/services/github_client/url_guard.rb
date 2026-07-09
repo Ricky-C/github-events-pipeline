@@ -41,10 +41,17 @@ class GithubClient
     # firehose (D-005); rejecting them would exclude the most common actors
     # from enrichment (D-023, D-024).
     #
-    # It belongs to the guard, not to any one caller: whatever the guard
-    # parsed must be what the client requests, and every caller — ingest
-    # pre-validation, a stored URL, a redirect Location — gets the same
-    # answer to the same URL (D-025).
+    # It belongs to the guard, not to any one caller: whatever the guard parsed
+    # must be what the client requests, so ingest pre-validation and the
+    # fetch-time re-check of a stored URL cannot disagree (D-025).
+    #
+    # It does *not* reach a redirect Location. `perform` resolves that against
+    # the request URI with `URI.join` before calling the guard, and `URI.join`
+    # refuses raw brackets itself — so a 301 pointing at a bracketed URL is a
+    # `:transient_error`, never a fetch. Fail-closed, and left that way: making
+    # the redirect path follow bot renames means normalizing an
+    # attacker-influenced header before it is resolved, which is a change to
+    # argue for on its own evidence, not a side effect of this one.
     def normalize_brackets(url)
       url.to_s.gsub("[", "%5B").gsub("]", "%5D")
     end
