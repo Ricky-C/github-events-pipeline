@@ -39,7 +39,7 @@ docker compose run --rm test
 Within the first minute you should see:
 ```jsonc
 // TODO(phase-4): paste real poll.cycle line
-{"event":"poll.cycle","events_seen":30,"push_events_new":14,"duplicates_skipped":0,"budget_remaining":57,"next_poll_in":60}
+{"event":"poll.cycle","status":"ok","events_seen":30,"push_events_new":14,"duplicates_skipped":0,"malformed_skipped":0,"structured_skipped":0,"budget_remaining":57,"sleep_for":120}
 ```
 
 Under rate limiting (expected during long runs — this is normal, not an error):

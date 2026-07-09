@@ -74,15 +74,37 @@ Assume every operation can be interrupted and replayed:
 | 403 / 429 | Sleep until `reset_at` + jitter; enrichment jobs park. Every such wait is clamped to the one-hour rate window — a header asking for longer is a desynced shard, not an instruction (D-024) |
 | Worker hard-killed mid-fetch | Solid Queue dead-letters the claimed execution; `EnrichmentSweep` releases the record and re-claims it within one sweep interval (D-024) |
 | 404 (actor/repo) | Mark `not_found`, never retry |
-| 5xx / timeout / DNS | Exponential backoff, capped attempts, then skip-and-log |
+| 5xx / timeout / DNS | Poller: capped exponential backoff, absorbed indefinitely — a process restart cannot fix the network. Enrichment: `retry_on` backoff, 5 attempts, then the claim is released with `enrich.retry_exhausted` |
 | Malformed payload | Persist raw, skip structured, warn — never raise |
 | Payload URL host ≠ api.github.com | Reject (SSRF guard), `security.url_rejected` log |
-| Postgres unavailable | Wait-and-retry at boot; compose healthcheck ordering |
+| Postgres unavailable at boot | Compose healthcheck gates `migrate`, which gates the services |
+| Postgres dies mid-run | DB-shaped errors (`IngestRunner::TRANSIENT_ERRORS`) back off with `poll.error`; after `MAX_CONSECUTIVE_FAILURES` consecutive failures (~20 min) the ingester logs fatal `poll.escalated` and exits nonzero so compose's `restart: unless-stopped` recycles it (D-026) |
+| Programming error mid-cycle | Fatal `poll.escalated reason=permanent_error`, immediate nonzero exit — retrying re-runs the same bug; Docker's restart backoff paces the restart loop (D-026) |
 | SIGTERM | Finish in-flight unit, exit clean |
 
 ## Observability
 
-One JSON object per line to stdout/stderr (`docker compose logs -f` is the operator UI). Canonical events: `poll.cycle`, `poll.rate_limited`, `enrich.enqueued|cache_hit|skipped|success|parked|retry|retry_exhausted|terminal|rejected|scrubbed|enqueue_failed|sweep|swept|sweep_aborted`, `ingest.malformed`, `ingest.structured_skipped`, `security.url_rejected`, `etag.unstorable`. Every log carries `ts`, `level`, `component`, `event`; counts over one poll cycle reconcile (seen = new + duplicates + non-push + malformed; `structured_skipped` is an overlay on top of that partition, not a term in it — see D-020/D-021).
+One JSON object per line to stdout/stderr (`docker compose logs -f` is the operator UI). Two layers own the shape: `JsonLogFormatter` (lib/) renders the line and neutralizes hostile bytes — its reserved `ts`/`level` keys win every merge, so payload-derived keys cannot forge a severity or timestamp — and the `StructuredLogging` mixin stamps `component` and `event` at every call site (D-027). This list is transcribed from what the code emits; changing either without the other is a defect (D-027):
+
+| Component | Event (level) | Key fields |
+|---|---|---|
+| `ingester` | `poll.cycle` (info) | `status`, `not_modified`, `events_seen`, `push_events_new`, `duplicates_skipped`, `malformed_skipped`, `structured_skipped`, `budget_remaining`, `sleep_for` |
+| `ingester` | `poll.rate_limited` (info) | `reset_at`, `retry_after`, `sleep_for` — an overlay on the cycle line; exhausted shared budget is normal operation |
+| `ingester` | `poll.error` (error) | `error_class`, `message`, `consecutive` — DB-shaped failure, absorbed and backed off (D-026) |
+| `ingester` | `poll.escalated` (fatal) | `reason` (`permanent_error` \| `transient_failures_exhausted`), `error_class`, `message`, `consecutive` — last line before a nonzero exit (D-026) |
+| `ingester` | `shutdown.clean` (info) | — |
+| `ingester` | `ingest.malformed` / `ingest.structured_skipped` (warn) | `reason`, `detail` |
+| `ingester` | `enrich.enqueued` / `enrich.cache_hit` / `enrich.skipped` (info) | `entity`, `github_id` (+ `fetched_at` / `reason`) |
+| `ingester` | `enrich.enqueue_failed` (error) | `error_class`, `message` |
+| `worker` | `enrich.success` (info) | `entity`, `github_id`, `not_modified` (`true` = 304 revalidation) |
+| `worker` | `enrich.parked` (info) | `reason` (`budget` \| `rate_limited`), `run_at` |
+| `worker` | `enrich.retry` (warn) / `enrich.retry_exhausted` (error) | `status`/`error` · `job`, `record_id`, `error_class` |
+| `worker` | `enrich.terminal` (info) / `enrich.rejected` (warn) / `enrich.scrubbed` (warn) | `reason` / `body_class` / `error_class` |
+| `worker` | `enrich.sweep` (info) / `enrich.swept` (warn) / `enrich.sweep_aborted` (error) | `swept` · `reason`, `reclaimed` · `class_name`, `solid_queue_job_id` |
+| both | `security.url_rejected` (error) | `entity`, `github_id`, `reason` (+ `detail` at ingest) |
+| `github_client` | `etag.unstorable` (warn) / `auth.unexpected_401` (error) | `bytesize` / `msg` |
+
+Level convention: **info** narrates the healthy lifecycle (including rate limiting — that is the system working); **warn** is an upstream data anomaly, absorbed; **error** is a guard refusal, a broken invariant, or lost work; **fatal** precedes a deliberate nonzero exit. Counts over one poll cycle reconcile (seen = new + duplicates + non-push + malformed; `structured_skipped` is an overlay on top of that partition, not a term in it — see D-020/D-021).
 
 ## Technology Choices (summary — details in docs/DECISIONS.md)
 
