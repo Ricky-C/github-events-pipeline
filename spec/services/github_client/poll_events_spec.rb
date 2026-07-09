@@ -223,16 +223,21 @@ RSpec.describe GithubClient, "#poll_events" do
     end
   end
 
-  # Net::HTTP hands header bytes through verbatim, and `etag` is the one
-  # externally-sourced string that reaches a column. PostgreSQL refuses a NUL
-  # in a bind with a bare ArgumentError — outside every rescue this project
-  # has — and refuses invalid UTF-8 with an error the D-018 scrub cannot
-  # repair, because scrubbing an ETag would forge one. So the client refuses
-  # it here, the way the parser refuses an unstorable payload field (D-024).
+  # Net::HTTP hands header bytes through verbatim — tagged ASCII-8BIT — and
+  # `etag` is the one externally-sourced string that reaches a column.
+  # PostgreSQL refuses a NUL in a bind with a bare ArgumentError — outside
+  # every rescue this project has — and refuses invalid UTF-8 with an error
+  # the D-018 scrub cannot repair, because scrubbing an ETag would forge one.
+  # So the client refuses it here, the way the parser refuses an unstorable
+  # payload field (D-024), judging the bytes rather than the tag (D-025).
   describe "unstorable ETags" do
     {
       "a NUL" => "W/\"a\u0000b\"",
       "invalid UTF-8" => "W/\"a\xC3\x28b\"".dup.force_encoding("UTF-8"),
+      # The shape a real response delivers, and the one a UTF-8-tagged check
+      # cannot see: `valid_encoding?` is vacuously true for every byte
+      # sequence tagged ASCII-8BIT (D-025). WebMock preserves the tag.
+      "binary-tagged invalid UTF-8" => "W/\"a\xC3\x28b\"".b,
       "an oversized value" => "W/\"#{'a' * 300}\""
     }.each do |description, etag|
       it "drops an ETag carrying #{description} rather than persist it" do
@@ -247,6 +252,20 @@ RSpec.describe GithubClient, "#poll_events" do
         # one request. Storing the header would cost the row.
         expect(RateLimitState.current.etag).to eq('W/"old"')
       end
+    end
+
+    # The other half of judging bytes: a *surviving* ETag is emitted under the
+    # tag it was checked against, never Net::HTTP's ASCII-8BIT original, so a
+    # caller can never persist bytes that nothing validated as UTF-8 (D-025).
+    it "returns a surviving ETag re-tagged UTF-8" do
+      stub_request(:get, events_url)
+        .to_return(status: 200, headers: { "etag" => "W/\"caf\xC3\xA9\"".b }, body: "[]")
+
+      result = client.poll_events
+
+      expect(result.etag.encoding).to eq(Encoding::UTF_8)
+      expect(result.etag).to eq("W/\"caf\xC3\xA9\"")
+      expect(RateLimitState.current.etag).to eq("W/\"caf\xC3\xA9\"")
     end
   end
 

@@ -51,6 +51,8 @@ Immutable value object. Exactly one `status` per call:
 
 **Everything a Result carries is storable (D-024).** The client is the single validation layer for response headers, as `PushEventParser` is for payload fields (D-020) — a caller may persist a `Result` field without re-checking it, and must not try, or the two layers drift. `etag` is `nil` unless it passes `StorableString` (≤ 255 chars, valid UTF-8, NUL-free); `rate[:reset_at]` is `nil` unless its epoch falls in years 2000–9999; `rate[:remaining]` and `poll_interval` are `nil` unless they fit PostgreSQL's `integer`. Dropped values read as *unknown*, which is the boot state every caller already handles.
 
+`StorableString` judges a value's **bytes as UTF-8**, not the encoding its `String` happens to be tagged with: Net::HTTP hands header values back `ASCII-8BIT`, under which `valid_encoding?` is true of every byte sequence and `length` counts bytes rather than characters (D-025). A surviving `etag` is therefore returned re-tagged `UTF-8` — the tag that was checked is the tag the column receives.
+
 Convenience predicates: `ok?`, `not_modified?`, `rate_limited?`, `terminal?` (`:not_found` or `:rejected_url`), `retryable?` (`:transient_error`).
 
 ### Budget

@@ -244,6 +244,22 @@ RSpec.describe EnrichmentFetcher do
       expect(actor.etag).to be_nil
       expect(actor.data).to eq("login" => "octocat")
     end
+
+    # Net::HTTP tags header values ASCII-8BIT, where `valid_encoding?` is true
+    # of every byte sequence — so the client's guard has to judge the bytes as
+    # UTF-8, or this ETag reaches the bind it exists to stop (D-025).
+    it "settles the record when a binary-tagged etag carries invalid UTF-8" do
+      stub_request(:get, user_url).to_return(
+        status: 200, headers: { "etag" => "W/\"a\xC3\x28b\"".b }, body: '{"login":"octocat"}'
+      )
+
+      expect { fetcher.call(actor) }.not_to raise_error
+
+      actor.reload
+      expect(actor.fetch_status).to eq("fetched")
+      expect(actor.etag).to be_nil
+      expect(actor.data).to eq("login" => "octocat")
+    end
   end
 
   describe "hostile enrichment body" do

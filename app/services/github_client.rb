@@ -208,13 +208,20 @@ class GithubClient
   # Result or into the mirror — is already storable, so no caller has to
   # re-check and the two layers cannot drift. An unstorable ETag becomes nil,
   # which only means the next fetch is unconditional (D-024).
+  #
+  # The value returned is the UTF-8-tagged copy, never Net::HTTP's ASCII-8BIT
+  # original: the tag the predicate judged is the tag the column receives, so
+  # a caller cannot persist bytes under a tag nothing checked (D-025).
   def storable_etag(response)
-    etag = response["etag"]
-    return etag if etag.nil? || StorableString.valid?(etag, max: MAX_ETAG_LENGTH)
+    header = response["etag"]
+    return nil if header.nil?
+
+    etag = StorableString.utf8(header)
+    return etag if StorableString.valid?(etag, max: MAX_ETAG_LENGTH)
 
     # Never the header bytes themselves: they are why this line exists.
     Rails.logger.warn(component: "github_client", event: "etag.unstorable",
-                      bytesize: etag.bytesize)
+                      bytesize: header.bytesize)
     nil
   end
 
