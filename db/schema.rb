@@ -10,9 +10,23 @@
 #
 # It's strongly recommended that you check this file into your version control system.
 
-ActiveRecord::Schema[8.1].define(version: 2026_07_08_000004) do
+ActiveRecord::Schema[8.1].define(version: 2026_07_08_000006) do
   # These are extensions that must be enabled in order to support this database
   enable_extension "pg_catalog.plpgsql"
+
+  create_table "actors", force: :cascade do |t|
+    t.string "avatar_url"
+    t.datetime "created_at", null: false
+    t.jsonb "data"
+    t.string "etag"
+    t.string "fetch_status", default: "pending", null: false
+    t.datetime "fetched_at"
+    t.bigint "github_id", null: false
+    t.string "login", null: false
+    t.datetime "updated_at", null: false
+    t.string "url"
+    t.index ["github_id"], name: "index_actors_on_github_id", unique: true
+  end
 
   create_table "push_events", force: :cascade do |t|
     t.bigint "actor_github_id", null: false
@@ -49,6 +63,19 @@ ActiveRecord::Schema[8.1].define(version: 2026_07_08_000004) do
     t.jsonb "payload", null: false
     t.datetime "received_at", null: false
     t.index ["github_event_id"], name: "index_raw_events_on_github_event_id", unique: true
+  end
+
+  create_table "repositories", force: :cascade do |t|
+    t.datetime "created_at", null: false
+    t.jsonb "data"
+    t.string "etag"
+    t.string "fetch_status", default: "pending", null: false
+    t.datetime "fetched_at"
+    t.string "full_name", null: false
+    t.bigint "github_id", null: false
+    t.datetime "updated_at", null: false
+    t.string "url"
+    t.index ["github_id"], name: "index_repositories_on_github_id", unique: true
   end
 
   create_table "solid_queue_blocked_executions", force: :cascade do |t|
