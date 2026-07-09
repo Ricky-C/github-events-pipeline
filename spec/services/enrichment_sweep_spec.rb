@@ -156,6 +156,46 @@ RSpec.describe EnrichmentSweep do
     it_behaves_like "an enrichment sweep"
   end
 
+  # A job the sweep cannot map back to a record is a job whose liveness it
+  # cannot judge — and the sweep's one dangerous mistake is judging a live job
+  # dead, which enqueues a duplicate on every 15-minute run, forever. Dropping
+  # the unreadable job from the map (what `.except(nil)` did) is exactly that
+  # mistake. Abort the model's sweep instead and say so (D-025).
+  describe "a job whose record id cannot be read" do
+    let!(:actor) do
+      Actor.create!(github_id: 1, login: "a", url: "https://api.github.com/a",
+                    fetch_status: "enqueued").tap { |row| row.update_columns(updated_at: 10.minutes.ago) }
+    end
+
+    let!(:repository) do
+      Repository.create!(github_id: 2, full_name: "a/b", url: "https://api.github.com/b",
+                         fetch_status: "enqueued").tap { |row| row.update_columns(updated_at: 10.minutes.ago) }
+    end
+
+    def aborted_entries
+      logger.messages(:error).select { |message| message[:event] == "enrich.sweep_aborted" }
+    end
+
+    {
+      "a non-Integer argument" => { "job_class" => "EnrichActorJob", "arguments" => [ "1" ] },
+      "no arguments envelope" => { "job_class" => "EnrichActorJob" },
+      "an empty argument list" => { "job_class" => "EnrichActorJob", "arguments" => [] }
+    }.each do |description, arguments|
+      it "aborts the actor sweep, leaving the repository sweep to run, on #{description}" do
+        job = SolidQueue::Job.create!(queue_name: "enrichment", class_name: "EnrichActorJob",
+                                      scheduled_at: Time.current, arguments: arguments)
+
+        expect(sweep.call).to eq(1)
+
+        expect(actor.reload.fetch_status).to eq("enqueued")
+        expect(enqueued_jobs.map { |queued| queued["job_class"] }).to eq([ "EnrichRepositoryJob" ])
+        expect(aborted_entries.first)
+          .to include(class_name: "EnrichActorJob", solid_queue_job_id: job.id)
+        expect(swept_entries.map { |entry| entry[:entity] }).to eq([ "repository" ])
+      end
+    end
+  end
+
   it "logs a summary even when nothing is stranded" do
     sweep.call
 
@@ -172,5 +212,50 @@ RSpec.describe EnrichmentSweep do
     expect(sweep.call).to eq(2)
     expect(enqueued_jobs.map { |job| job["job_class"] })
       .to contain_exactly("EnrichActorJob", "EnrichRepositoryJob")
+  end
+end
+
+# Every example above hand-writes its `solid_queue_jobs` rows, so all of them
+# would keep passing if Active Job's serialization envelope, or the jobs' own
+# signature, ever moved underneath `EnrichmentSweep#record_id`. This one
+# enqueues through the real adapter and asserts the sweep can still find the
+# record id in what Active Job actually wrote. It is the canary for the
+# assumption the fail-safe above merely contains (D-025).
+#
+# Transactional fixtures off, like spec/models/enrichable_concurrency_spec.rb:
+# the :test adapter records enqueues in an array no transaction can roll back,
+# which is precisely the fidelity this example needs to give up.
+RSpec.describe EnrichmentSweep, "against a real Solid Queue enqueue" do
+  self.use_transactional_tests = false
+
+  around do |example|
+    previous = ActiveJob::Base.queue_adapter
+    ActiveJob::Base.queue_adapter = :solid_queue
+    example.run
+  ensure
+    ActiveJob::Base.queue_adapter = previous
+  end
+
+  # Foreign keys cascade from solid_queue_jobs to every execution table.
+  after do
+    SolidQueue::Job.delete_all
+    Actor.delete_all
+  end
+
+  let(:logger) { RecordingLogger.new }
+
+  it "reads the record id Active Job serialized, and sweeps nothing" do
+    actor = Actor.create!(github_id: 4242, login: "octocat", url: "https://api.github.com/x",
+                          fetch_status: "enqueued")
+    actor.update_columns(updated_at: 10.minutes.ago)
+    EnrichActorJob.perform_later(actor.id)
+
+    expect(described_class.new(logger: logger).call).to eq(0)
+
+    # An unreadable envelope would abort the sweep rather than reclaim, so the
+    # count alone cannot tell "job found live" from "job unreadable".
+    expect(logger.messages(:error)).to be_empty
+    expect(actor.reload.fetch_status).to eq("enqueued")
+    expect(SolidQueue::Job.where(class_name: "EnrichActorJob").count).to eq(1)
   end
 end

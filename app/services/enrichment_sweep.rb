@@ -34,16 +34,38 @@ class EnrichmentSweep
   private
 
   def sweep(model, job_class)
-    jobs = SolidQueue::Job.where(class_name: job_class.name, finished_at: nil)
-                          .includes(:failed_execution)
-                          .group_by { |job| record_id(job) }
-                          .except(nil)
+    jobs = unfinished_jobs_by_record(job_class)
+    return 0 if jobs.nil?
 
     stranded = model.where(fetch_status: "enqueued")
                     .where(updated_at: ..(@clock.now - GRACE))
                     .reject { |record| jobs.fetch(record.id, []).any? { |job| live?(job) } }
 
     stranded.count { |record| reclaim(model, job_class, record, jobs.fetch(record.id, [])) }
+  end
+
+  # nil means "refuse to sweep this model". A job whose record id cannot be
+  # read is a job whose liveness cannot be judged, and the only mistake this
+  # sweep can make is judging a live job dead — which enqueues a duplicate on
+  # every run, forever. Discarding the unreadable job would do exactly that,
+  # silently. The other model is untouched: the two share nothing but a
+  # process (D-025).
+  def unfinished_jobs_by_record(job_class)
+    jobs = {}
+    SolidQueue::Job.where(class_name: job_class.name, finished_at: nil)
+                   .includes(:failed_execution).each do |job|
+      id = record_id(job)
+      return log_abort(job) if id.nil?
+
+      (jobs[id] ||= []) << job
+    end
+    jobs
+  end
+
+  def log_abort(job)
+    @logger.error(component: "worker", event: "enrich.sweep_aborted",
+                  class_name: job.class_name, solid_queue_job_id: job.id)
+    nil
   end
 
   # A job that will still run: not finished, not dead-lettered, and not parked
