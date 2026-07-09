@@ -36,7 +36,8 @@ RSpec.describe IngestRunner, "chaos checks" do
     run_cycles(2)
 
     expect(logger.messages(:info))
-      .to include(hash_including(event: "poll.rate_limited", reset_at: reset_at, sleep_for: 120))
+      .to include(hash_including(event: "poll.rate_limited", reset_at: reset_at.iso8601,
+                                 sleep_for: 120))
     expect(cycle_logs.map { |entry| entry[:status] }).to eq(%i[ rate_limited ok ])
     expect(logger.messages(:fatal)).to be_empty
   end

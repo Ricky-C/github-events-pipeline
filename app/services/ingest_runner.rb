@@ -124,7 +124,7 @@ class IngestRunner
       # is the system working as designed, and an operator scanning logs
       # must be able to tell that apart from an error without decoding
       # cycle fields. The README's verify section points at this event.
-      log_event(:info, "poll.rate_limited", reset_at: result.rate&.fetch(:reset_at, nil),
+      log_event(:info, "poll.rate_limited", reset_at: result.rate&.fetch(:reset_at, nil)&.iso8601,
                                             retry_after: result.retry_after, sleep_for: wait)
     end
 

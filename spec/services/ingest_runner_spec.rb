@@ -87,8 +87,10 @@ RSpec.describe IngestRunner do
       run_loop([ result(:rate_limited, retry_after: 90,
                         rate: { remaining: 0, reset_at: now + 120 }) ])
 
+      # iso8601, matching enrich.parked's run_at — one timestamp format
+      # across every operator-facing log field.
       expect(logger.messages(:info))
-        .to include(hash_including(event: "poll.rate_limited", reset_at: now + 120,
+        .to include(hash_including(event: "poll.rate_limited", reset_at: (now + 120).iso8601,
                                    retry_after: 90, sleep_for: 90))
       # The cycle line still fires — poll.rate_limited is an overlay, so the
       # per-cycle count reconciliation stays intact.
