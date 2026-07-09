@@ -130,6 +130,31 @@ RSpec.describe EnrichmentQueuer do
     end
   end
 
+  # An event that carries no URL told us nothing; it did not attack us. The
+  # entity persists as `pending` with a NULL url — unclaimable, and healed by
+  # any later event that does carry one — while `security.url_rejected` stays
+  # a signal that means what it says (D-025).
+  describe "an event supplying no actor URL" do
+    def actor_url_event(url)
+      event = GithubFixtures.first_push.deep_dup
+      url.nil? ? event["actor"].delete("url") : event["actor"]["url"] = url
+      event
+    end
+
+    { "omits the url key" => nil, "supplies an empty url" => "" }.each do |description, url|
+      it "persists a pending, url-less stub and raises no security alarm when the event #{description}" do
+        queuer.call(rows_for([ actor_url_event(url) ]))
+
+        actor = Actor.find_by!(github_id: first_actor["id"])
+        expect(actor.url).to be_nil
+        expect(actor.fetch_status).to eq("pending")
+        expect(entries(:error, "security.url_rejected")).to be_empty
+        expect(entries(:info, "enrich.skipped").first).to include(entity: "actor", reason: "no_url")
+        expect(enqueued_classes).not_to include("EnrichActorJob")
+      end
+    end
+  end
+
   describe "TTL gate" do
     it "skips a freshly fetched entity and logs the cache hit" do
       Actor.create!(github_id: first_actor["id"], login: first_actor["login"],

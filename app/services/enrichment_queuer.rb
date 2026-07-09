@@ -99,7 +99,15 @@ class EnrichmentQueuer
   # Payload URLs are untrusted input (D-008): the same guard the client
   # applies pre-flight runs here at ingest, so a refused URL is caught with
   # a security log at the earliest layer and never even persisted.
+  #
+  # An absent or empty URL is not a refusal — the event simply carried none.
+  # Passing it to the guard would security-log every such event as "scheme is
+  # not https", drowning the signal that means an attack. The stub upserts
+  # with a NULL url, is never claimable, and the existing `enrich.skipped
+  # no_url` covers the observability (D-025).
   def checked_url(entity, attrs)
+    return nil if attrs[:url].blank?
+
     status, checked = GithubClient::UrlGuard.check(normalize_brackets(attrs[:url]))
     if status == :ok && StorableString.valid?(checked.to_s, max: MAX_URL_LENGTH)
       return checked.to_s
