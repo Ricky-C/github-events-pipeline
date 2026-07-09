@@ -54,7 +54,7 @@ Modeling decisions (full rationale in `docs/DECISIONS.md`):
 
 - **Raw + structured, not raw + views.** Real columns give plain-SQL access (the story's requirement), honest indexes, and schema-as-documentation. Raw jsonb is retained for audit/replay — structured tables are rebuildable from raw.
 - **Enrichment is additive.** Stub actor/repo rows are created from payload data at ingest; enrichment fills them in later. Push events are immediately queryable with ids/logins even before (or without) enrichment.
-- **`fetch_status` is a tiny state machine** (`pending → fetched | not_found`) so terminal failures are data, not retries.
+- **`fetch_status` is a small state machine** (`pending → enqueued → fetched | not_found | rejected`, back to `pending` on retry exhaustion; `fetched` re-claims after the 24h TTL) so in-flight dedup and terminal failures are data, not retries (D-023).
 
 ## Idempotency & Restart Safety (Extension B)
 
@@ -81,7 +81,7 @@ Assume every operation can be interrupted and replayed:
 
 ## Observability
 
-One JSON object per line to stdout/stderr (`docker compose logs -f` is the operator UI). Canonical events: `poll.cycle`, `poll.rate_limited`, `enrich.success|cache_hit|parked|retry|terminal`, `ingest.malformed`, `ingest.structured_skipped`, `security.url_rejected`. Every log carries `ts`, `level`, `component`, `event`; counts over one poll cycle reconcile (seen = new + duplicates + non-push + malformed; `structured_skipped` is an overlay on top of that partition, not a term in it — see D-020/D-021).
+One JSON object per line to stdout/stderr (`docker compose logs -f` is the operator UI). Canonical events: `poll.cycle`, `poll.rate_limited`, `enrich.enqueued|cache_hit|skipped|success|parked|retry|retry_exhausted|terminal|scrubbed|enqueue_failed`, `ingest.malformed`, `ingest.structured_skipped`, `security.url_rejected`. Every log carries `ts`, `level`, `component`, `event`; counts over one poll cycle reconcile (seen = new + duplicates + non-push + malformed; `structured_skipped` is an overlay on top of that partition, not a term in it — see D-020/D-021).
 
 ## Technology Choices (summary — details in docs/DECISIONS.md)
 
