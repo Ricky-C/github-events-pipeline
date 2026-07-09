@@ -31,13 +31,13 @@ Two processes, one datastore. The **ingester** polls; the **worker** enriches. B
 
 Unauthenticated GitHub API = 60 requests/hour/IP, shared across polling **and** enrichment. Naive design (poll every 10s + 2 enrichment calls per push) exhausts it in minutes. Controls, in order of leverage:
 
-1. **Conditional requests.** `/events` is polled with `If-None-Match: <etag>`. A `304 Not Modified` costs **zero** rate-limit budget. Per-record ETags are also stored for actor/repo re-fetches.
-2. **`X-Poll-Interval` compliance.** GitHub states the minimum poll interval in a response header; the ingester never polls faster.
-3. **Request budget.** `GithubClient` persists `X-RateLimit-Remaining`/`X-RateLimit-Reset`. Policy: polling has priority (it's ~1 req/interval and 304s are free); enrichment spends what remains down to a small reserve. At exhaustion, enrichment jobs **park** (reschedule to `reset_at` + jitter) rather than fail.
+1. **Conditional requests.** `/events` is polled with `If-None-Match: <etag>`. GitHub documents 304s as free, but measured trajectories show they **decrement `X-RateLimit-Remaining`** on the unauthenticated tier (D-017, D-022) — so conditional requests save bandwidth and parsing, not budget. Per-record ETags are still stored for actor/repo re-fetches (a 304 skips re-persisting an unchanged body).
+2. **Poll cadence floor.** GitHub states the minimum poll interval in a response header (60s); the ingester never polls faster than the header **or** its own `POLL_FLOOR` (120s), whichever is larger. Because every poll costs budget, honoring the served 60s would spend the entire 60/hr budget on polling; the floor caps polling at ~30 req/hr (D-022).
+3. **Request budget.** `GithubClient` persists `X-RateLimit-Remaining`/`X-RateLimit-Reset`. Policy: polling has priority (~30 req/hr at the floor); enrichment spends what remains down to a small reserve (`ENRICHMENT_RESERVE = 5`). At exhaustion, enrichment jobs **park** (reschedule to `reset_at` + jitter) rather than fail.
 4. **Fan-out control.** Actor/repo fetches are deduplicated two ways: a 24h TTL on `fetched_at` (the firehose is dominated by repeat actors — bots especially), and in-flight job dedup keyed on (type, github_id).
 5. **Worker concurrency = 1.** Serializes budget spend; no thundering herd at reset time. Throughput ceiling is the rate limit anyway, so concurrency buys nothing.
 
-Degradation mode under sustained limiting: ingestion keeps observing via free 304s; enrichment backlog queues durably in Postgres and drains each budget window. Nothing is lost, nothing crashes.
+Degradation mode under sustained limiting: the ingester sleeps to the reset and resumes at the floored cadence; enrichment backlog queues durably in Postgres and drains each budget window. Nothing is lost, nothing crashes.
 
 ## Data Model
 
@@ -70,7 +70,7 @@ Assume every operation can be interrupted and replayed:
 
 | Failure | Behavior |
 |---|---|
-| 304 Not Modified | Log `not_modified`, zero budget spent, sleep poll interval |
+| 304 Not Modified | Log `not_modified`, no body to ingest, sleep floored poll interval (budget is decremented like any request — D-022) |
 | 403 / 429 | Sleep until `reset_at` + jitter; enrichment jobs park |
 | 404 (actor/repo) | Mark `not_found`, never retry |
 | 5xx / timeout / DNS | Exponential backoff, capped attempts, then skip-and-log |

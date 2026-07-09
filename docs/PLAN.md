@@ -16,8 +16,8 @@ A containerized, unattended service that ingests GitHub PushEvents from the publ
 |---|---|---|---|---|---|
 | 0 | Scaffold: Rails 8 API, Docker Compose, Postgres | #1 | `chore/scaffold` | #7 | ✅ Merged |
 | 1 | Story 1: Ingest GitHub Push Events | #2 | `story-1-ingest` | #10 | ✅ Merged |
-| 2 | Story 2: Persist Raw and Structured Data | #3 | `story-2-structured-persistence` | #11 | 🔄 In progress |
-| 3 | Story 3: Enrich Push Events | #4 | `story-3-enrichment` | — | ☐ Not started |
+| 2 | Story 2: Persist Raw and Structured Data | #3 | `story-2-structured-persistence` | #11 | ✅ Merged |
+| 3 | Story 3: Enrich Push Events | #4 | `story-3-enrichment` | — | 🔄 In progress |
 | 4 | Story 4: Operability and Observability | #5 | `story-4-operability` | — | ☐ Not started |
 | 5 | Extensions (A/B docs, D tests) + Design Brief | #6 | `extensions-and-brief` | — | ☐ Not started |
 
