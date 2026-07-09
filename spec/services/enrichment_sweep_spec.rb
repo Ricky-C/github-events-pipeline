@@ -12,6 +12,13 @@ RSpec.describe EnrichmentSweep do
 
   def swept_entries = logger.messages(:warn).select { |message| message[:event] == "enrich.swept" }
 
+  # What EnrichmentFetcher#park_at can actually produce, spelled out from its
+  # own constants so the sweep's bound is checked against the park math rather
+  # than against itself.
+  def longest_park
+    GithubClient::RateWindow::MAX_WAIT + EnrichmentFetcher::MAX_PARK_JITTER
+  end
+
   # Solid Queue writes a job row for every enqueue, always with a scheduled_at
   # (Job.enqueue defaults it to Time.current) and an execution row created by
   # its own after_create hook.
@@ -104,6 +111,32 @@ RSpec.describe EnrichmentSweep do
 
       expect(sweep.call).to eq(0)
       expect(record.reload.fetch_status).to eq("enqueued")
+    end
+
+    # Derived from the *fetcher's* park math, never from the sweep's own
+    # MAX_PARK: sourced from the constant under test, these examples would
+    # follow it wherever it moved and assert nothing (see the mutation probe
+    # in docs/DECISIONS.md D-025).
+    #
+    # A wait clamped to the rate window, plus the full de-synchronizing jitter
+    # added afterwards, is the longest run_at EnrichmentFetcher can compute.
+    # Bound the sweep by the window alone and this legitimate park reads as
+    # "beyond" it for as many seconds as the jitter it happened to draw.
+    it "never touches a record parked at the longest run_at the fetcher can compute" do
+      job = job_for(described_job, record.id, scheduled_at: Time.current + longest_park)
+
+      expect(sweep.call).to eq(0)
+
+      expect(record.reload.fetch_status).to eq("enqueued")
+      expect(SolidQueue::Job.exists?(job.id)).to be(true)
+      expect(enqueued_jobs).to be_empty
+    end
+
+    it "frees a record parked one second past anything the fetcher could write" do
+      job_for(described_job, record.id, scheduled_at: Time.current + longest_park + 1.second)
+
+      expect(sweep.call).to eq(1)
+      expect(swept_entries.first).to include(reason: "scheduled_beyond_window")
     end
 
     it "never touches a record claimed within the grace period" do

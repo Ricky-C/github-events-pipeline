@@ -18,6 +18,13 @@ class EnrichmentSweep
   # in-flight, not stranded.
   GRACE = 1.minute
 
+  # The longest run_at EnrichmentFetcher can compute for a park: its wait is
+  # clamped to the rate window, and the jitter it adds afterwards to
+  # de-synchronize parked jobs is bounded (D-024). A scheduled_at further out
+  # than this, measured from the job's own creation, is one no live code path
+  # could have written.
+  MAX_PARK = GithubClient::RateWindow::MAX_WAIT + EnrichmentFetcher::MAX_PARK_JITTER
+
   ENTITIES = [ [ Actor, EnrichActorJob ], [ Repository, EnrichRepositoryJob ] ].freeze
 
   def initialize(logger: Rails.logger, clock: Time)
@@ -69,15 +76,20 @@ class EnrichmentSweep
   end
 
   # A job that will still run: not finished, not dead-lettered, and not parked
-  # past the rate window. That last clause frees an entity wedged by a
-  # far-future park — impossible to create since the wait clamp landed
-  # (GithubClient::RateWindow), but a pre-clamp binary could have left one.
+  # further out than a park can reach. That last clause frees an entity wedged
+  # beyond what clamp-plus-jitter can produce — a schedule written by a
+  # pre-clamp binary, or corrupted since.
   def live?(job)
     job.failed_execution.nil? && !beyond_window?(job)
   end
 
+  # Anchored to the job's own creation, not to the sweep's clock: a park lands
+  # at most MAX_PARK seconds after the row is written, so the bound is exact
+  # and cannot depend on when the sweep happens to look. Measured from `now`,
+  # a maximal park sampled moments after it was made reads as beyond the
+  # window — and gets discarded and re-enqueued for nothing (D-025).
   def beyond_window?(job)
-    job.scheduled_at.present? && job.scheduled_at > @clock.now + GithubClient::RateWindow::MAX_WAIT
+    job.scheduled_at.present? && job.scheduled_at > job.created_at + MAX_PARK
   end
 
   # Release then re-claim, rather than reaching into Solid Queue's own retry:
