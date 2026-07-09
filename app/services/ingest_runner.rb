@@ -117,17 +117,13 @@ class IngestRunner
     [ interval || DEFAULT_POLL_INTERVAL, POLL_FLOOR ].max
   end
 
+  # Header precedence and the rate-window bound belong to the client, and the
+  # enrichment parks read them from the same place (D-024, D-025). This loop
+  # supplies only its own blind fallback and its jitter.
   def until_reset(result)
-    reset_at = result.rate&.fetch(:reset_at, nil)
-    # Retry-After wins when present: a secondary/abuse limit asks for a short
-    # wait while the same response still carries the primary bucket's far-off
-    # reset — sleeping to the reset would park the loop for the wrong reason
-    # (spec § HTTP → Result Mapping: "honor retry-after if present").
-    base = result.retry_after || (reset_at ? (reset_at - @clock.now).ceil : DEFAULT_POLL_INTERVAL)
-    # A past reset must not become a zero-sleep hot loop, and a header asking
-    # for a wait beyond the rate window must not blind the poller for years:
-    # the same clamp the enrichment parks use (D-024).
-    GithubClient::RateWindow.clamp(base) + @jitter.call
+    GithubClient::RateWindow.wait(retry_after: result.retry_after,
+                                  reset_at: result.rate&.fetch(:reset_at, nil),
+                                  now: @clock.now, fallback: DEFAULT_POLL_INTERVAL) + @jitter.call
   end
 
   def backoff

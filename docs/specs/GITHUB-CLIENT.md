@@ -69,7 +69,9 @@ end
 
 **Policy constants (live with the callers, documented here):** `ENRICHMENT_RESERVE = 5` — enrichment jobs check `budget.spendable?(reserve: ENRICHMENT_RESERVE, at: now)` before fetching and park until `reset_at` if not. Polling checks nothing — it has priority by design (D-006), but is capped by `IngestRunner::POLL_FLOOR = 120s` because every poll costs budget, 304s included (D-022).
 
-**`GithubClient::RateWindow.clamp(seconds)`** is client-owned, like `UrlGuard`, and bounds every wait a caller derives from a rate header to `MAX_WAIT = 1.hour`, floored at 1s. The one-hour primary window is a fact about the API, so the bound lives with the client; both enrichment park sites and `IngestRunner#until_reset` call it, so it cannot drift (D-024).
+**`GithubClient::RateWindow`** is client-owned, like `UrlGuard`. `clamp(seconds)` bounds every wait a caller derives from a rate header to `MAX_WAIT = 1.hour`, floored at 1s — the one-hour primary window is a fact about the API, so the bound lives with the client.
+
+`wait(retry_after:, reset_at:, now:, fallback:)` is how a caller turns those headers into a duration, and it owns the *precedence* as well as the bound (D-025): `retry_after` wins whenever present (a secondary limit's short wait beats the primary bucket's far-off reset); otherwise a future `reset_at` gives the ceiling of its delta; otherwise the caller's `fallback`. A `reset_at` **already in the past** means the mirror is stale, not that the window rolled, so it takes the `fallback` too — never a one-second retry against an API that just said stop. Callers supply only their own `fallback` and their own jitter. Both enrichment park sites and `IngestRunner#until_reset` call it, so neither the bound nor the precedence can drift (D-024, D-025).
 
 ## Request Discipline
 
@@ -140,22 +142,24 @@ loop:
   case r.status
   when :ok           -> ingest(r.body); sleep max(r.poll_interval, floor)
   when :not_modified -> sleep max(r.poll_interval_or_last_known, floor)
-  when :rate_limited -> sleep RateWindow.clamp(r.retry_after || (r.rate.reset_at - now)) + jitter   # retry-after wins when present
+  when :rate_limited -> sleep RateWindow.wait(retry_after: r.retry_after, reset_at: r.rate.reset_at, now:, fallback: DEFAULT_POLL_INTERVAL) + jitter
   when :transient_error -> sleep backoff(attempt++)   # capped; never exit
 ```
 
 **Enrichment job (Phase 3):**
 ```
-return park(until: now + RateWindow.clamp(budget.reset_at - now || 60) + jitter) unless client.budget.spendable?(reserve: 5, at: now)
+return park(until: now + RateWindow.wait(retry_after: nil, reset_at: budget.reset_at, now:, fallback: 60) + jitter) unless client.budget.spendable?(reserve: 5, at: now)
 r = client.fetch_resource(record.url, etag: record.etag)
 case r.status
-when :ok            -> persist enrichment
+when :ok            -> persist enrichment if body is a JSON object, else mark rejected (terminal)
 when :not_modified  -> touch fetched_at
-when :rate_limited  -> park(until: now + RateWindow.clamp(r.retry_after || (r.rate.reset_at - now) || 60) + jitter)  # retry_after is a duration; reset_at an instant
+when :rate_limited  -> park(until: now + RateWindow.wait(retry_after: r.retry_after, reset_at: r.rate.reset_at, now:, fallback: 60) + jitter)  # retry_after is a duration; reset_at an instant
 when :not_found     -> mark not_found (terminal)
 when :rejected_url  -> mark rejected + security log (terminal)
 when :transient_error -> raise for Solid Queue retry (backoff, capped)
 ```
+
+`RateWindow.wait` resolves the precedence in both blocks — retry-after over reset_at, stale reset to the caller's fallback — so the two loops cannot disagree about the same headers.
 
 ## Contract Test Checklist (Phase 1 unit specs — WebMock)
 
@@ -166,6 +170,7 @@ when :transient_error -> raise for Solid Queue retry (backoff, capped)
 - [ ] An ETag carrying a NUL, invalid UTF-8, or over 255 chars → `Result#etag` nil, stored ETag not advanced, no raise
 - [ ] `x-ratelimit-reset` outside years 2000–9999, or `x-ratelimit-remaining`/`x-poll-interval` outside PostgreSQL's `integer` → read as unknown, no raise
 - [ ] `RateWindow.clamp` bounds a wait to one hour and floors it at one second
+- [ ] `RateWindow.wait` precedence: `retry_after` beats a future `reset_at`; a future `reset_at` beats the fallback; a past `reset_at` and a missing one both take the fallback; `Retry-After: 0` floors to one second
 - [ ] Parses and exposes `x-poll-interval`
 - [ ] 200 updates persisted `remaining`/`reset_at`; visible via `budget`
 - [ ] 403 with remaining=0 → `:rate_limited` with correct `reset_at`

@@ -96,9 +96,13 @@ RSpec.describe IngestRunner do
       expect(cycle_logs.last[:sleep_for]).to eq(60)
     end
 
-    it "waits at least a second when reset_at is already in the past" do
+    # A reset already behind us says the mirror is stale, not that the window
+    # rolled: the poller blind-waits the default interval rather than retrying
+    # in a second against an API that has just said stop. Both park sites and
+    # this loop read that rule from RateWindow.wait (D-025).
+    it "blind-waits the default interval when reset_at is already in the past" do
       run_loop([ result(:rate_limited, rate: { remaining: 0, reset_at: now - 30 }) ])
-      expect(cycle_logs.last[:sleep_for]).to eq(1)
+      expect(cycle_logs.last[:sleep_for]).to eq(described_class::DEFAULT_POLL_INTERVAL)
     end
 
     # A header asking for a wait past the rate window is a desynced shard or a

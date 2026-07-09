@@ -110,21 +110,14 @@ class EnrichmentFetcher
     Outcome.new(action: :parked, run_at: run_at)
   end
 
-  # Retry-After wins when present (a secondary limit's short wait vs the
-  # primary bucket's far-off reset — same reasoning as IngestRunner). Both the
-  # zero-wait hot loop and the far-future park that would wedge this record at
-  # `enqueued` forever are bounded by the shared clamp (D-024).
+  # Header precedence, the stale-reset fallback, and the bound that keeps a
+  # far-future park from wedging this record at `enqueued` forever all live in
+  # RateWindow (D-024, D-025). What is this caller's own is the blind wait it
+  # falls back to and the jitter that de-synchronizes it from the poller.
   def park_at(retry_after:, reset_at:)
     now = @clock.now
-    seconds =
-      if retry_after
-        retry_after
-      elsif reset_at && reset_at > now
-        (reset_at - now).ceil
-      else
-        PARK_FALLBACK
-      end
-    now + GithubClient::RateWindow.clamp(seconds) + @jitter.call
+    now + GithubClient::RateWindow.wait(retry_after: retry_after, reset_at: reset_at,
+                                        now: now, fallback: PARK_FALLBACK) + @jitter.call
   end
 
   def retry_later(record, result)
