@@ -4,8 +4,13 @@
 # exits nonzero — a poll loop that crashes overnight ingests nothing.
 class IngestRunner
   DEFAULT_POLL_INTERVAL = 60
-  # Never poll faster than this even if X-Poll-Interval is absent or zero.
-  POLL_FLOOR = 10
+  # Never poll faster than this, even when X-Poll-Interval asks for it.
+  # Conditional polls are not free: measured 304s decrement
+  # X-RateLimit-Remaining (D-017, D-022), so honoring the served 60s
+  # interval would spend the entire 60/hr budget on polling and starve
+  # enrichment. 120s caps polling at ~30 req/hr; a served interval larger
+  # than the floor still wins.
+  POLL_FLOOR = 120
   BACKOFF_BASE = 5
   BACKOFF_CAP = 300
   # 5 * 2**7 already exceeds the cap; clamping keeps a weeks-long outage
@@ -112,16 +117,13 @@ class IngestRunner
     [ interval || DEFAULT_POLL_INTERVAL, POLL_FLOOR ].max
   end
 
+  # Header precedence and the rate-window bound belong to the client, and the
+  # enrichment parks read them from the same place (D-024, D-025). This loop
+  # supplies only its own blind fallback and its jitter.
   def until_reset(result)
-    reset_at = result.rate&.fetch(:reset_at, nil)
-    # Retry-After wins when present: a secondary/abuse limit asks for a short
-    # wait while the same response still carries the primary bucket's far-off
-    # reset — sleeping to the reset would park the loop for the wrong reason
-    # (spec § HTTP → Result Mapping: "honor retry-after if present").
-    base = result.retry_after || (reset_at ? (reset_at - @clock.now).ceil : DEFAULT_POLL_INTERVAL)
-    # A reset_at already in the past must not become a zero-sleep hot loop
-    # against a limited API — always wait at least a second.
-    [ base, 1 ].max + @jitter.call
+    GithubClient::RateWindow.wait(retry_after: result.retry_after,
+                                  reset_at: result.rate&.fetch(:reset_at, nil),
+                                  now: @clock.now, fallback: DEFAULT_POLL_INTERVAL) + @jitter.call
   end
 
   def backoff

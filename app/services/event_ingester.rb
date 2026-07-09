@@ -14,11 +14,11 @@ class EventIngester
   # payload size is bounded upstream by the client's 5 MB response cap.
   MAX_EVENT_ID_LENGTH = 64
 
-  # Everything a single row can raise: PG refusals surface as
-  # StatementInvalid, but a payload jsonb cannot serialize (invalid UTF-8)
-  # dies client-side as JSON::GeneratorError before PG ever sees it —
-  # treating only the former as row-scoped cost a whole page (D-021).
-  ROW_ERRORS = [ ActiveRecord::StatementInvalid, JSON::GeneratorError ].freeze
+  # Everything a single row can raise, and the scrub-and-mark answer when
+  # the row's own data is at fault, live in JsonScrubber — shared with the
+  # enrichment fetcher, which persists the same kind of payload (D-018,
+  # D-021).
+  ROW_ERRORS = JsonScrubber::ROW_ERRORS
 
   # Single owner of the counts shape — also the zero for callers whose
   # cycle never reaches ingest (IngestRunner logs it on non-ok polls).
@@ -27,8 +27,9 @@ class EventIngester
       structured_skipped: 0 }
   end
 
-  def initialize(logger: Rails.logger)
+  def initialize(logger: Rails.logger, queuer: EnrichmentQueuer.new)
     @logger = logger
+    @queuer = queuer
   end
 
   # events: the parsed body array from GithubClient::Result#body.
@@ -91,6 +92,7 @@ class EventIngester
     skipped.each do |skipped_id, reason|
       warn_ingest("ingest.structured_skipped", reason, detail: skipped_id)
     end
+    enqueue_enrichment(rows, result[:rejected_ids])
     { events_seen: events.size,
       push_events_new: result[:inserted],
       duplicates_skipped: candidates - result[:inserted] - result[:rejected_ids].size,
@@ -99,6 +101,25 @@ class EventIngester
   end
 
   private
+
+  # Enrichment is additive and strictly best-effort: by the time ingest
+  # runs, the client's ETag has advanced past this page, so raising here
+  # would report a fully persisted page as a poll failure. A missed enqueue
+  # self-heals — the firehose repeats entities and the TTL re-claims them
+  # (D-005). Deliberately outside the raw transaction: a stub failure must
+  # never cost raw persistence. Only parsed-ok rows whose raw row landed
+  # qualify — a rejected row's identity fields were never verified against
+  # a persisted event. The counts partition stays untouched; the queuer
+  # logs its own events.
+  def enqueue_enrichment(rows, rejected_ids)
+    eligible = rows.select do |row|
+      row[:structured] && !rejected_ids.include?(row[:github_event_id])
+    end
+    @queuer.call(eligible) if eligible.any?
+  rescue StandardError => e
+    @logger.error(component: "ingester", event: "enrich.enqueue_failed",
+                  error_class: e.class.name, message: e.message)
+  end
 
   def insert(rows)
     return { inserted: 0, rejected_ids: [] } if rows.empty?
@@ -137,11 +158,9 @@ class EventIngester
 
   # A refused row gets one retry: scrubbed only when the failure describes
   # the row's data ("\u0000" or invalid bytes in the payload, unstorable
-  # in jsonb — D-018, D-021), unmodified for everything else — contention,
-  # connection blips, unforeseen refusals. Classifying by data-shape rather
-  # than enumerating transients means a false payload_scrubbed marker can
-  # never be stamped onto an authentic payload by an error a list missed.
-  # A row that fails both attempts counts as rejected.
+  # in jsonb — D-018, D-021), unmodified for everything else — see
+  # JsonScrubber.data_shaped?. A row that fails both attempts counts as
+  # rejected.
   def insert_each(rows, batch_error:)
     inserted = 0
     rejected_ids = []
@@ -149,8 +168,9 @@ class EventIngester
       inserted += insert_batch([ row ])
     rescue *ROW_ERRORS => e
       begin
-        inserted += insert_batch([ data_shaped?(e) ? scrub(row) : row ])
-        warn_ingest("ingest.malformed", "payload_scrubbed", detail: row[:github_event_id]) if data_shaped?(e)
+        data_shaped = JsonScrubber.data_shaped?(e)
+        inserted += insert_batch([ data_shaped ? scrub(row) : row ])
+        warn_ingest("ingest.malformed", "payload_scrubbed", detail: row[:github_event_id]) if data_shaped
       rescue *ROW_ERRORS => retry_error
         rejected_ids << row[:github_event_id]
         warn_ingest("ingest.malformed", "row_rejected",
@@ -165,30 +185,10 @@ class EventIngester
     { inserted: inserted, rejected_ids: rejected_ids }
   end
 
-  # Data-shaped: jsonb couldn't serialize the payload client-side, or PG
-  # refused the values themselves (SQLSTATE class 22 — NUL escapes, invalid
-  # encoding, numeric overflow). Everything else is not the row's fault.
-  def data_shaped?(error)
-    error.is_a?(JSON::GeneratorError) || error.cause.is_a?(PG::DataException)
-  end
-
+  # The marker key records that this copy is not authentic — the parser
+  # refuses to rebuild from it (D-018, D-021).
   def scrub(row)
-    row.merge(payload: scrub_unstorable(row[:payload]).merge("payload_scrubbed" => true))
-  end
-
-  # Strip what jsonb can never store — NUL anywhere, invalid UTF-8 bytes —
-  # from every string, hash keys included. Raw fidelity is knowingly traded
-  # for durability here: the verbatim payload was unstorable to begin with,
-  # and the marker key records that this copy is not authentic — the parser
-  # refuses to rebuild from it (D-018, D-021). String#scrub must run before
-  # #delete, which raises on invalid encodings.
-  def scrub_unstorable(value)
-    case value
-    when String then value.scrub.delete("\u0000")
-    when Hash then value.to_h { |key, val| [ scrub_unstorable(key), scrub_unstorable(val) ] }
-    when Array then value.map { |element| scrub_unstorable(element) }
-    else value
-    end
+    row.merge(payload: JsonScrubber.scrub_unstorable(row[:payload]).merge("payload_scrubbed" => true))
   end
 
   def warn_ingest(event, reason, detail:)

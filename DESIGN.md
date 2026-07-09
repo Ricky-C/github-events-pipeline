@@ -25,7 +25,8 @@ Two processes, one datastore, one HTTP chokepoint. -->
 ## Rate Limits & Durability
 
 <!-- The Extension A + B narrative, ~one-third of the brief:
-- Conditional requests: 304s cost zero budget → observation is nearly free
+- Conditional requests: measured, and documented, to cost budget unless authenticated
+  (D-017/D-022) → the poll floor, not the ETag, is what buys enrichment its budget
 - X-Poll-Interval compliance; jittered sleeps on 403/429
 - Budget policy: polling priority, enrichment takes remainder, parks at reserve
 - Fan-out: 24h TTL + in-flight dedup collapses fetches to unique entities/day

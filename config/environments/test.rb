@@ -9,6 +9,12 @@ Rails.application.configure do
   # While tests run files are not watched, reloading is not necessary.
   config.enable_reloading = false
 
+  # Specs assert enqueues via ActiveJob::TestHelper and drive performs
+  # explicitly; Solid Queue's tables exist in the test schema but are never
+  # touched. Explicit for the same reason the app adapter is (D-010): never
+  # trust an env default to pick the queue backend.
+  config.active_job.queue_adapter = :test
+
   # Always eager load: a boot error in any autoloaded file must fail the
   # suite, not the long-running services. Unconditional (not keyed off CI)
   # so ad-hoc rspec runs keep the same guarantee as the compose test service.

@@ -60,10 +60,21 @@ services:
         condition: service_completed_successfully
     restart: unless-stopped
 
-  # Phase 0 stub: Solid Queue and enrichment jobs arrive in Phase 3.
+  # Solid Queue supervisor (dispatcher + one enrichment worker + the sweep
+  # scheduler, per config/queue.yml and config/recurring.yml).
+  #
+  # The two timeouts are ordered on purpose. A SIGTERMed worker fork releases
+  # its claimed execution only if it deregisters before the supervisor
+  # SIGQUITs it; lose that race and the execution is dead-lettered, which
+  # loses the enrichment. So the fork gets 20s (config/application.rb) —
+  # longer than a worst-case 15s fetch — and compose must not SIGKILL the
+  # supervisor before then, which its 10s default would. A hard kill
+  # (SIGKILL, OOM) still strands the claim; EnrichmentSweep recovers it
+  # (docs/DECISIONS.md D-024).
   worker:
     <<: *app
-    command: ["bin/rails", "runner", 'Rails.logger.info({component: "worker", event: "boot.ok", rails_env: Rails.env, db: ActiveRecord::Base.connection.select_value("SELECT 1") && "connected", msg: "Solid Queue arrives in Phase 3"}); sleep']
+    command: ["bin/jobs"]
+    stop_grace_period: 25s
     depends_on:
       migrate:
         condition: service_completed_successfully

@@ -49,5 +49,22 @@ module GithubEventsPipeline
     # Middleware like session, flash, cookies can be added back manually.
     # Skip views, helpers and assets when generating a new resource.
     config.api_only = true
+
+    # Jobs are Postgres rows in the same database as everything else
+    # (docs/DECISIONS.md D-002, D-010). Set explicitly: the development-env
+    # default is the in-process async adapter, which would fake-pass
+    # enrichment without any worker running. Solid Queue itself uses the
+    # primary connection because no `config.solid_queue.connects_to` is set —
+    # that absence is deliberate, not an omission.
+    config.active_job.queue_adapter = :solid_queue
+
+    # Longer than a worst-case fetch (GithubClient OPEN_TIMEOUT + READ_TIMEOUT
+    # = 15s). The worker fork waits this long for its job before deregistering
+    # — which *releases* the claimed execution — while the supervisor waits the
+    # same interval before SIGQUITing it, which strands the claim in the
+    # dead-letter table instead. At the 5s default the two race and an ordinary
+    # `docker compose restart worker` mid-fetch loses the enrichment
+    # (docs/DECISIONS.md D-024). Give the fork room to win.
+    config.solid_queue.shutdown_timeout = 20.seconds
   end
 end

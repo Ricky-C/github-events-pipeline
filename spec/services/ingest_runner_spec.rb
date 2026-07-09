@@ -45,35 +45,37 @@ RSpec.describe IngestRunner do
   end
 
   describe "cadence policy" do
-    it "ingests the body and sleeps the reported poll interval after :ok" do
-      run_loop([ ok_result(interval: 60) ])
+    it "ingests the body and sleeps a reported poll interval above the floor after :ok" do
+      run_loop([ ok_result(interval: 180) ])
 
       expect(ingester).to have_received(:ingest)
-      expect(cycle_logs.last).to include(status: :ok, sleep_for: 60, budget_remaining: 57, **counts)
+      expect(cycle_logs.last).to include(status: :ok, sleep_for: 180, budget_remaining: 57, **counts)
     end
 
-    it "defaults the interval when the header is absent" do
+    it "floors the default interval when the header is absent" do
       run_loop([ ok_result(interval: nil) ])
-      expect(cycle_logs.last[:sleep_for]).to eq(IngestRunner::DEFAULT_POLL_INTERVAL)
+      expect(cycle_logs.last[:sleep_for]).to eq(IngestRunner::POLL_FLOOR)
     end
 
-    it "never polls faster than the floor" do
-      run_loop([ ok_result(interval: 3) ])
+    it "never polls faster than the floor, even at GitHub's served 60s interval" do
+      # 304s cost budget (D-017, D-022): the served interval is deliberately
+      # not honored below the floor.
+      run_loop([ ok_result(interval: 60) ])
       expect(cycle_logs.last[:sleep_for]).to eq(IngestRunner::POLL_FLOOR)
     end
 
     it "does not ingest on :not_modified and reuses the response interval" do
-      run_loop([ result(:not_modified, poll_interval: 60) ])
+      run_loop([ result(:not_modified, poll_interval: 180) ])
 
       expect(ingester).not_to have_received(:ingest)
       expect(cycle_logs.last).to include(status: :not_modified, not_modified: true,
-                                         sleep_for: 60, events_seen: 0)
+                                         sleep_for: 180, events_seen: 0)
     end
 
     it "falls back to the last persisted interval on a header-less :not_modified" do
-      RateLimitState.record!(poll_interval: 75)
+      RateLimitState.record!(poll_interval: 150)
       run_loop([ result(:not_modified) ])
-      expect(cycle_logs.last[:sleep_for]).to eq(75)
+      expect(cycle_logs.last[:sleep_for]).to eq(150)
     end
 
     it "sleeps until reset_at plus jitter when rate-limited" do
@@ -94,9 +96,26 @@ RSpec.describe IngestRunner do
       expect(cycle_logs.last[:sleep_for]).to eq(60)
     end
 
-    it "waits at least a second when reset_at is already in the past" do
+    # A reset already behind us says the mirror is stale, not that the window
+    # rolled: the poller blind-waits the default interval rather than retrying
+    # in a second against an API that has just said stop. Both park sites and
+    # this loop read that rule from RateWindow.wait (D-025).
+    it "blind-waits the default interval when reset_at is already in the past" do
       run_loop([ result(:rate_limited, rate: { remaining: 0, reset_at: now - 30 }) ])
-      expect(cycle_logs.last[:sleep_for]).to eq(1)
+      expect(cycle_logs.last[:sleep_for]).to eq(described_class::DEFAULT_POLL_INTERVAL)
+    end
+
+    # A header asking for a wait past the rate window is a desynced shard or a
+    # rewritten Retry-After, not an instruction (D-024). Honoring it would
+    # blind the poller for years; the enrichment parks share the clamp.
+    it "never sleeps past the rate window on a far-future reset_at" do
+      run_loop([ result(:rate_limited, rate: { remaining: 0, reset_at: now + 70.years }) ])
+      expect(cycle_logs.last[:sleep_for]).to eq(GithubClient::RateWindow::MAX_WAIT)
+    end
+
+    it "never sleeps past the rate window on an absurd retry-after" do
+      run_loop([ result(:rate_limited, retry_after: 99_999_999) ])
+      expect(cycle_logs.last[:sleep_for]).to eq(GithubClient::RateWindow::MAX_WAIT)
     end
   end
 
@@ -108,7 +127,7 @@ RSpec.describe IngestRunner do
 
     it "resets the backoff counter after a successful cycle" do
       run_loop([ result(:transient_error, error: "boom"), ok_result, result(:transient_error, error: "boom") ])
-      expect(cycle_logs.map { |entry| entry[:sleep_for] }).to eq([ 5, 60, 5 ])
+      expect(cycle_logs.map { |entry| entry[:sleep_for] }).to eq([ 5, IngestRunner::POLL_FLOOR, 5 ])
     end
   end
 

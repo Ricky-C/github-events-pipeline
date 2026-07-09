@@ -58,7 +58,7 @@ docker compose exec db psql -U postgres -d app_development -c \
 
 **Important context for first runs:**
 
-- The 60 req/hr unauthenticated limit is **per IP**. On a shared/office network, the budget may already be spent by others. If you see `poll.rate_limited` immediately, that is the system working as designed — it will resume observation via free conditional requests and full operation at the reset (top of the hour), not a bug.
+- The 60 req/hr unauthenticated limit is **per IP**. On a shared/office network, the budget may already be spent by others. If you see `poll.rate_limited` immediately, that is the system working as designed — it sleeps to the reset (top of the hour) and resumes, not a bug.
 - One-shot `docker compose run --rm ingest` shares the same IP budget as the running stack — running both concurrently is safe (idempotent writes) but doubles spend.
 - One-shot ingestion enqueues enrichment jobs; the `worker` service must be running for enrichment to drain.
 
@@ -66,7 +66,7 @@ docker compose exec db psql -U postgres -d app_development -c \
 
 - First `raw_events` / `push_events` rows: within one poll cycle (~60s)
 - First enriched actors/repositories: within 2–3 minutes, budget permitting
-- Under exhausted budget: ingestion continues via free 304 checks; enrichment parks and resumes at the rate-limit reset (top of the hour)
+- Under exhausted budget: the ingester sleeps to the rate-limit reset (top of the hour) and enrichment parks; both resume there. Conditional requests save bandwidth, not budget — GitHub exempts a 304 from the rate limit only when the request is authenticated (D-022)
 
 ## Project Structure
 

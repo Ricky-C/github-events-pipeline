@@ -44,6 +44,32 @@ RSpec.describe GithubClient, "#fetch_resource" do
     end
   end
 
+  # GitHub serves bot actor URLs with raw square brackets, which RFC 3986
+  # forbids and URI.parse refuses; bots dominate the firehose, so the guard
+  # escapes them before parsing (D-023). The escape belongs to the guard
+  # rather than to one caller, and these are the specs that say so — what the
+  # guard parsed is what the client requests (D-025).
+  describe "bracket normalization" do
+    let(:bot_url) { "https://api.github.com/users/github-actions[bot]" }
+    let(:escaped_url) { "https://api.github.com/users/github-actions%5Bbot%5D" }
+
+    it "escapes raw brackets and requests the escaped URL" do
+      stub = stub_request(:get, escaped_url).to_return(status: 200, headers: rate_headers, body: user_body)
+
+      expect(client.fetch_resource(bot_url)).to be_ok
+      expect(stub).to have_been_requested
+    end
+
+    # A stored URL arrives already escaped. Double-encoding it to %255B would
+    # 404 the firehose's most common actors.
+    it "leaves an already-escaped URL untouched" do
+      stub = stub_request(:get, escaped_url).to_return(status: 200, headers: rate_headers, body: user_body)
+
+      expect(client.fetch_resource(escaped_url)).to be_ok
+      expect(stub).to have_been_requested
+    end
+  end
+
   it "sends If-None-Match when an etag is given and maps 304 to :not_modified" do
     etag = 'W/"resource-etag"'
     stub = stub_request(:get, user_url)

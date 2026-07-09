@@ -9,6 +9,10 @@ gem "rails", "~> 8.1.3"
 # Use postgresql as the database for Active Record
 gem "pg", "~> 1.1"
 
+# Postgres-backed Active Job adapter — job durability = database durability,
+# one system of record (docs/DECISIONS.md D-002, D-010)
+gem "solid_queue", "~> 1.2"
+
 # Windows does not include zoneinfo files, so bundle the tzinfo-data gem
 gem "tzinfo-data", platforms: %i[ windows jruby ]
 

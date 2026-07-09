@@ -1,0 +1,26 @@
+# Solid Queue process topology. The dispatcher is not optional: parked and
+# retried jobs are scheduled_executions until a dispatcher promotes them to
+# ready_executions. The scheduler that fires EnrichmentSweepJob starts itself
+# from config/recurring.yml and needs no entry here.
+#
+# Worker concurrency is deliberately 1 (threads AND processes): enrichment
+# spends the shared 60/hr rate budget, and serializing spend keeps it
+# predictable — throughput is capped by the rate limit anyway
+# (docs/ARCHITECTURE.md § The Central Constraint, docs/DECISIONS.md D-005).
+default: &default
+  dispatchers:
+    - polling_interval: 1
+      batch_size: 100
+  workers:
+    - queues: [ enrichment ]
+      threads: 1
+      processes: 1
+      # Enrichment is not latency-sensitive; a slow poll keeps the
+      # primary-database query load negligible.
+      polling_interval: 2
+
+development:
+  <<: *default
+
+test:
+  <<: *default

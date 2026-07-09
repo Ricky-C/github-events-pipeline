@@ -14,6 +14,30 @@ RSpec.describe GithubClient::Budget do
     it "is false at zero with no reserve" do
       expect(described_class.new(0, nil, nil).spendable?).to be(false)
     end
+
+    # The stale-mirror escape. Nothing refreshes `remaining` until some
+    # request is made, so an exhausted budget whose window has already rolled
+    # has to be spendable — otherwise the caller that would refresh it is the
+    # caller waiting on it (D-023, D-025).
+    describe "once the observed window has rolled" do
+      let(:now) { Time.current }
+
+      it "is spendable even at zero" do
+        expect(described_class.new(0, now - 1.second, nil).spendable?(at: now)).to be(true)
+      end
+
+      it "counts the reset instant itself as rolled" do
+        expect(described_class.new(0, now, nil).spendable?(at: now)).to be(true)
+      end
+
+      it "is not spendable while that window is still open" do
+        expect(described_class.new(0, now + 1.second, nil).spendable?(reserve: 5, at: now)).to be(false)
+      end
+
+      it "cannot escape the reserve when no reset_at has ever been observed" do
+        expect(described_class.new(0, nil, nil).spendable?(reserve: 5, at: now)).to be(false)
+      end
+    end
   end
 
   describe "#exhausted?" do
