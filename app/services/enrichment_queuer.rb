@@ -100,7 +100,7 @@ class EnrichmentQueuer
   def checked_url(entity, attrs)
     return nil if attrs[:url].blank?
 
-    status, checked = GithubClient::UrlGuard.check(normalize_brackets(attrs[:url]))
+    status, checked = GithubClient::UrlGuard.check(attrs[:url])
     if status == :ok && StorableString.valid?(checked.to_s, max: MAX_URL_LENGTH)
       return checked.to_s
     end
@@ -109,23 +109,6 @@ class EnrichmentQueuer
     log(:error, "security.url_rejected", entity, attrs[:github_id], reason: reason,
         detail: JsonScrubber.scrub_unstorable(attrs[:url].to_s).slice(0, 120))
     nil
-  end
-
-  # GitHub serves bot actor URLs with raw square brackets
-  # (.../users/github-actions[bot]) — RFC 3986 forbids them, so URI.parse
-  # (and therefore the guard) rejects the URL as served. Percent-encode
-  # exactly those two characters: the escaped form names the same resource
-  # and GitHub accepts it. Escaping the whole URL is safe because no bracket
-  # survives it: RFC 3986 allows `[`/`]` only as the delimiters of an
-  # IP-literal host, and `%5B`/`%5D` contain none of `: @ / ? #`, so the
-  # substitution can neither introduce nor remove an authority boundary. The
-  # authority can then only be a reg-name or IPv4 — never an IPv6 literal —
-  # and a host that held a bracket only grows further from `api.github.com`.
-  # Idempotent, too: an already-encoded `%5B` is untouched. Bots dominate the
-  # firehose (D-005); rejecting them would exclude the most common actors
-  # from enrichment (D-023, D-024).
-  def normalize_brackets(url)
-    url.to_s.gsub("[", "%5B").gsub("]", "%5D")
   end
 
   def log(level, event, entity, github_id, **fields)

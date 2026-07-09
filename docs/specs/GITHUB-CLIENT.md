@@ -90,6 +90,8 @@ Refuse — returning `:rejected_url` *without making any request* — unless **a
 - host is exactly `api.github.com` (no subdomains, no userinfo, no IP literals, no port override)
 - after normalization (no `..` traversal to a different origin)
 
+**Bracket normalization is part of the guard, not of its callers (D-025).** `check` percent-encodes raw `[` and `]` before parsing: GitHub serves bot actor URLs as `.../users/github-actions[bot]`, which RFC 3986 forbids and `URI.parse` refuses, and bots dominate the firehose (D-023). The escape is idempotent (an already-encoded `%5B` is untouched) and cannot manufacture an authority — RFC 3986 admits brackets only as IP-literal delimiters, and `%5B`/`%5D` contain none of `: @ / ? #`. Owning it here means every caller (ingest pre-validation, a stored URL, a redirect `Location`) gets the same URL parsed and the same URL requested. Consequence: an IPv6-literal URL is refused as an *unparseable URL* rather than as a disallowed host — still `:rejected_url`, still zero requests.
+
 ### Redirect policy
 
 GitHub returns `301` for renamed repos/users. Follow **at most one** redirect, and only if the `Location` passes the same URL guard. The `Location` is first resolved against the request URI (RFC 7231 permits relative forms; an absolute `Location` wins the join), so a same-origin relative redirect is followed rather than misread as a scheme change. A second redirect, or a guarded-out target → `:transient_error` (redirect loop) / `:rejected_url` (bad target); a missing, blank, or unresolvable `Location` → `:transient_error`. The redirect hop consumes budget like any request — count it.
