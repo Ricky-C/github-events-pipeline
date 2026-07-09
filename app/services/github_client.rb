@@ -1,10 +1,14 @@
 require "net/http"
+require "zlib"
 
 # The single chokepoint for all GitHub API traffic (CLAUDE.md Golden Rule 3),
 # built to the binding contract in docs/specs/GITHUB-CLIENT.md. The client
 # returns facts as Result values; callers make all policy — it never sleeps,
 # never retries, and never raises for expected outcomes.
 class GithubClient
+  include StructuredLogging
+  self.log_component = "github_client"
+
   API_HOST = "api.github.com"
   EVENTS_URL = "https://#{API_HOST}/events".freeze
   VERSION = "0.1"
@@ -34,10 +38,19 @@ class GithubClient
     "X-GitHub-Api-Version" => "2022-11-28"
   }.freeze
 
+  # Everything the transport can throw means "this request failed", never
+  # "this code is wrong": the poll loop treats any exception that escapes
+  # this client as a bug and exits (D-026), so this list must cover the
+  # whole network surface. SystemCallError is deliberately the parent
+  # class — inside an HTTP request every errno is a socket failure, and
+  # enumerating leaves is how EPIPE got missed. Zlib is here because
+  # Net::HTTP negotiates gzip and inflates transparently, so a truncated
+  # or corrupt stream raises out of read_body.
   NETWORK_ERRORS = [
-    Net::OpenTimeout, Net::ReadTimeout,
-    Errno::ECONNREFUSED, Errno::ECONNRESET, Errno::EHOSTUNREACH, Errno::ENETUNREACH,
-    SocketError, OpenSSL::SSL::SSLError, EOFError, IOError
+    Net::OpenTimeout, Net::ReadTimeout, Net::ProtocolError,
+    Net::HTTPBadResponse, Net::HTTPHeaderSyntaxError,
+    SystemCallError, SocketError, OpenSSL::SSL::SSLError,
+    Zlib::Error, EOFError, IOError
   ].freeze
 
   # Internal control flow only: raised mid-stream to abort an over-cap read
@@ -54,8 +67,11 @@ class GithubClient
   end
   private_constant :BodyTooLarge
 
-  def initialize(state: RateLimitState)
+  # logger: nil falls through to Rails.logger in log_event (D-027) — the
+  # param exists so specs can record this client's lines like any service's.
+  def initialize(state: RateLimitState, logger: nil)
     @state = state
+    @logger = logger
   end
 
   # GET /events with the persisted ETag. A 304 costs nothing to parse, but it
@@ -193,13 +209,16 @@ class GithubClient
     when 401
       # Impossible without an auth header, and this project must never have
       # one — log loudly per spec so a stray credential is caught fast.
-      Rails.logger.error(component: "github_client", event: "auth.unexpected_401",
-                         msg: "401 from an unauthenticated request — check for a stray auth header")
+      log_event(:error, "auth.unexpected_401",
+                msg: "401 from an unauthenticated request — check for a stray auth header")
       Result.new(status: :transient_error, error: "unexpected 401", rate: rate)
     else
       Result.new(status: :transient_error, error: "HTTP #{status}", rate: rate)
     end
   rescue JSON::ParserError => e
+    # Warn, not info: an unparseable 2xx is an upstream data anomaly,
+    # absorbed (ARCHITECTURE level convention) — and never the body bytes.
+    log_event(:warn, "body.unparseable", error_class: e.class.name, bytesize: body.bytesize)
     Result.new(status: :transient_error, error: "unparseable body: #{e.class}", rate: rate)
   end
 
@@ -220,8 +239,7 @@ class GithubClient
     return etag if StorableString.valid?(etag, max: MAX_ETAG_LENGTH)
 
     # Never the header bytes themselves: they are why this line exists.
-    Rails.logger.warn(component: "github_client", event: "etag.unstorable",
-                      bytesize: header.bytesize)
+    log_event(:warn, "etag.unstorable", bytesize: header.bytesize)
     nil
   end
 

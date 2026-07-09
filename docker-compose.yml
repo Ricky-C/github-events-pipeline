@@ -51,7 +51,9 @@ services:
         condition: service_healthy
 
   # Continuous poll loop: honors X-Poll-Interval, parks until reset when
-  # rate-limited, capped backoff on transient errors — never exits nonzero.
+  # rate-limited, capped backoff on DB-shaped errors. A permanent error or
+  # an exhausted failure streak exits nonzero on purpose so the restart
+  # policy below can recycle the container (D-026).
   ingester:
     <<: *app
     command: ["bin/rails", "runner", "IngestRunner.new.run"]

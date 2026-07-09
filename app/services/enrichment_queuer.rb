@@ -4,6 +4,9 @@
 # the ingester process, after raw persistence, best-effort — EventIngester
 # never lets a queuer failure cost the page.
 class EnrichmentQueuer
+  include StructuredLogging
+  self.log_component = "ingester"
+
   # Guard-passed api.github.com URLs are short by construction; anything
   # longer than this is not a URL this pipeline should store or fetch
   # (docs/THREAT-MODEL.md length validation).
@@ -115,7 +118,6 @@ class EnrichmentQueuer
   end
 
   def log(level, event, entity, github_id, **fields)
-    @logger.public_send(level, { component: "ingester", event: event,
-                                 entity: entity, github_id: github_id }.merge(fields))
+    log_event(level, event, entity: entity, github_id: github_id, **fields)
   end
 end

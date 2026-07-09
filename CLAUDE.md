@@ -39,7 +39,7 @@ Local (outside Docker) commands should not be assumed to work; the container is 
 - Service objects in `app/services/`, one responsibility each (`GithubClient`, `EventIngester`, `PushEventParser`)
 - Jobs in `app/jobs/`, thin — delegate logic to services so it's unit-testable
 - Migrations: every externally-sourced ID gets a unique index; writes are `upsert`/`ON CONFLICT` — assume every operation may be retried
-- Logging: one JSON line per meaningful event via the shared `StructuredLogger`; never `puts`; never log full raw payloads at info level
+- Logging: one JSON line per meaningful event — `JsonLogFormatter` owns the line shape, call sites go through the `StructuredLogging` mixin's `log_event` (D-027); never `puts`; never log full raw payloads at info level
 - Rescue specific errors, never bare `rescue`; transient failures retry with backoff, terminal failures (404) are marked and never retried
 - No comments explaining *what*; comments only for *why* (especially rate-limit and idempotency decisions)
 

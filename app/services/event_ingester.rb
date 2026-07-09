@@ -7,6 +7,9 @@
 # rejects still lands raw; only its structured projection is skipped, and
 # that skip is warned only once the raw row's fate is known (D-020, D-021).
 class EventIngester
+  include StructuredLogging
+  self.log_component = "ingester"
+
   # Real GitHub event ids are ~11-digit numeric strings; 64 chars is
   # generous headroom while still bounding what payload-derived data can
   # reach an indexed column (docs/THREAT-MODEL.md length validation).
@@ -117,8 +120,7 @@ class EventIngester
     end
     @queuer.call(eligible) if eligible.any?
   rescue StandardError => e
-    @logger.error(component: "ingester", event: "enrich.enqueue_failed",
-                  error_class: e.class.name, message: e.message)
+    log_event(:error, "enrich.enqueue_failed", error_class: e.class.name, message: e.message)
   end
 
   def insert(rows)
@@ -164,6 +166,7 @@ class EventIngester
   def insert_each(rows, batch_error:)
     inserted = 0
     rejected_ids = []
+    last_error = batch_error
     rows.each do |row|
       inserted += insert_batch([ row ])
     rescue *ROW_ERRORS => e
@@ -172,6 +175,7 @@ class EventIngester
         inserted += insert_batch([ data_shaped ? scrub(row) : row ])
         warn_ingest("ingest.malformed", "payload_scrubbed", detail: row[:github_event_id]) if data_shaped
       rescue *ROW_ERRORS => retry_error
+        last_error = retry_error
         rejected_ids << row[:github_event_id]
         warn_ingest("ingest.malformed", "row_rejected",
                     detail: "#{row[:github_event_id]} (#{retry_error.class.name})")
@@ -179,9 +183,13 @@ class EventIngester
     end
 
     # Every row refused means the failure was never row-specific (dead DB,
-    # deadlock — StatementInvalid covers those too): re-raise the original
-    # so the caller's backoff and loud one-shot paths see it.
-    raise batch_error if rejected_ids.size == rows.size
+    # deadlock): raise so the caller's backoff and loud one-shot paths see
+    # it — but the *retry-time* error, not the batch's first. The poll loop
+    # classifies what it rescues by class (D-026, D-028), and only the last
+    # attempt reflects the conditions now: a batch that failed on a data
+    # shape but whose retries all died DB-shaped must not exit the process
+    # as a permanent error.
+    raise last_error if rejected_ids.size == rows.size
     { inserted: inserted, rejected_ids: rejected_ids }
   end
 
@@ -194,6 +202,6 @@ class EventIngester
   def warn_ingest(event, reason, detail:)
     # Never the payload itself at this level (CLAUDE.md logging rules) —
     # reason + truncated identifying detail is enough to investigate.
-    @logger.warn(component: "ingester", event: event, reason: reason, detail: detail)
+    log_event(:warn, event, reason: reason, detail: detail)
   end
 end

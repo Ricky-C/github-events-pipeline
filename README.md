@@ -38,19 +38,20 @@ docker compose run --rm test
 
 Within the first minute you should see:
 ```jsonc
-// TODO(phase-4): paste real poll.cycle line
-{"event":"poll.cycle","events_seen":30,"push_events_new":14,"duplicates_skipped":0,"budget_remaining":57,"next_poll_in":60}
+// captured from a live run (Phase 4 verification)
+{"ts":"2026-07-09T19:10:16.053Z","level":"info","component":"ingester","event":"poll.cycle","status":"ok","not_modified":false,"budget_remaining":59,"sleep_for":120,"events_seen":30,"push_events_new":28,"duplicates_skipped":0,"malformed_skipped":0,"structured_skipped":0}
 ```
 
 Under rate limiting (expected during long runs — this is normal, not an error):
 ```jsonc
-// TODO(phase-4): paste real poll.rate_limited line
+// captured from the real ingest loop replaying the 403 fixture (spec/fixtures/github/events_403_rate_limited.http)
+{"ts":"2026-07-09T19:09:49.664Z","level":"info","component":"ingester","event":"poll.rate_limited","reset_at":"2026-07-09T01:20:00Z","retry_after":null,"sleep_for":60}
 ```
 
 **2. Check the database:**
 
 ```bash
-docker compose exec db psql -U postgres -d app_development -c \
+docker compose exec db psql -U postgres -d github_events_pipeline_development -c \
   "SELECT count(*) FROM raw_events;
    SELECT count(*) FROM push_events;
    SELECT count(*) FROM actors WHERE fetch_status='fetched';"
@@ -64,7 +65,7 @@ docker compose exec db psql -U postgres -d app_development -c \
 
 **3. Expected timing:**
 
-- First `raw_events` / `push_events` rows: within one poll cycle (~60s)
+- First `raw_events` / `push_events` rows: within one poll cycle (~2 min — the poll floor is 120s because 304s cost budget, D-022)
 - First enriched actors/repositories: within 2–3 minutes, budget permitting
 - Under exhausted budget: the ingester sleeps to the rate-limit reset (top of the hour) and enrichment parks; both resume there. Conditional requests save bandwidth, not budget — GitHub exempts a 304 from the rate limit only when the request is authenticated (D-022)
 

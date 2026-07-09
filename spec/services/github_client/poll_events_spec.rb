@@ -166,12 +166,16 @@ RSpec.describe GithubClient, "#poll_events" do
       expect(result).to be_retryable
     end
 
-    it "maps unparseable JSON to :transient_error" do
+    it "maps unparseable JSON to :transient_error and warns without the body bytes" do
       stub_request(:get, events_url).to_return(status: 200, body: '{"truncated":')
+      allow(Rails.logger).to receive(:warn)
 
       result = client.poll_events
       expect(result).to be_retryable
       expect(result.error).to include("unparseable")
+      expect(Rails.logger).to have_received(:warn)
+        .with(hash_including(event: "body.unparseable", error_class: "JSON::ParserError",
+                             bytesize: 13))
     end
 
     it "does not advance the stored ETag past a 200 whose body failed to parse" do
@@ -207,6 +211,30 @@ RSpec.describe GithubClient, "#poll_events" do
 
     it "maps a connection failure to :transient_error" do
       stub_request(:get, events_url).to_raise(Errno::ECONNREFUSED)
+
+      result = client.poll_events
+      expect(result).to be_retryable
+    end
+
+    it "maps an errno outside the enumerated few to :transient_error" do
+      # EPIPE was never on the old allowlist — covering SystemCallError
+      # wholesale is the point (D-028): inside a request, every errno is a
+      # socket failure, and an escaped one exits the poll loop as a bug.
+      stub_request(:get, events_url).to_raise(Errno::EPIPE)
+
+      result = client.poll_events
+      expect(result).to be_retryable
+    end
+
+    it "maps a truncated gzip stream to :transient_error — Net::HTTP inflates transparently" do
+      stub_request(:get, events_url).to_raise(Zlib::BufError)
+
+      result = client.poll_events
+      expect(result).to be_retryable
+    end
+
+    it "maps a malformed status line to :transient_error" do
+      stub_request(:get, events_url).to_raise(Net::HTTPBadResponse)
 
       result = client.poll_events
       expect(result).to be_retryable

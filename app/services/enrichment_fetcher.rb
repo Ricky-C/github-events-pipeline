@@ -4,6 +4,9 @@
 # Active Job mechanics. Split from the job so the policy is unit-testable
 # without a queue (CLAUDE.md: jobs stay thin).
 class EnrichmentFetcher
+  include StructuredLogging
+  self.log_component = "worker"
+
   # Enrichment never spends the window down to zero: polling has priority
   # (D-006) and the persisted mirror can lag a few requests behind reality
   # (a desynced shard was observed live — D-022), so a small reserve keeps
@@ -47,7 +50,7 @@ class EnrichmentFetcher
     when :rejected_url then reject(record, result)
     when :rate_limited
       park(record, reason: "rate_limited", retry_after: result.retry_after,
-           reset_at: result.rate&.fetch(:reset_at, nil))
+           reset_at: result.reset_at)
     else
       retry_later(record, result)
     end
@@ -145,8 +148,7 @@ class EnrichmentFetcher
   def done = Outcome.new(action: :done)
 
   def log(level, event, record, **fields)
-    @logger.public_send(level, { component: "worker", event: event,
-                                 entity: record.model_name.singular,
-                                 github_id: record.github_id }.merge(fields))
+    log_event(level, event, entity: record.model_name.singular,
+                            github_id: record.github_id, **fields)
   end
 end
