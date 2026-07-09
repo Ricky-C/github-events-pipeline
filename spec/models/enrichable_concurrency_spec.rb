@@ -73,12 +73,16 @@ RSpec.describe "enrichment claim atomicity", type: :model do
   end
 
   it "lets exactly one of two concurrent claims win once the TTL has expired" do
-    existing_actor(fetch_status: "fetched", fetched_at: Enrichable::ENRICHMENT_TTL.ago - 1.minute)
+    actor = existing_actor(fetch_status: "fetched", fetched_at: Enrichable::ENRICHMENT_TTL.ago - 1.minute)
 
-    wins = in_parallel(2) { Actor.claim_for_enrichment(github_id) }
+    wins = in_parallel(2) do
+      Actor.claim_and_enqueue(github_id: github_id, job_class: EnrichActorJob, record_id: actor.id)
+    end
 
     expect(wins.count(true)).to eq(1)
     expect(wins.count(false)).to eq(1)
+    # The loser enqueues nothing: winning the claim is what authorizes the job.
+    expect(actor_jobs.count).to eq(1)
   end
 
   # The atomicity proof proper. A read-modify-write claim would not block —
@@ -130,13 +134,16 @@ RSpec.describe "enrichment claim atomicity", type: :model do
   # class's `enqueue_after_transaction_commit`, set on ApplicationJob because
   # Rails 8.1's Active Job railtie excludes that key from the application-level
   # config it applies to ActiveJob::Base (D-024). This example is its guard.
+  #
+  # It drives `claim_and_enqueue` itself, wrapped in an outer transaction this
+  # example rolls back. Re-implementing the pairing inline here would guard
+  # neither production caller — the property is a fact about that method.
   it "inserts the job row inside the claim transaction and rolls both back together" do
     actor = existing_actor
     enqueued_before_commit = nil
 
     Actor.transaction do
-      Actor.claim_for_enrichment(github_id)
-      EnrichActorJob.perform_later(actor.id)
+      Actor.claim_and_enqueue(github_id: github_id, job_class: EnrichActorJob, record_id: actor.id)
       enqueued_before_commit = actor_jobs.count
       raise ActiveRecord::Rollback
     end

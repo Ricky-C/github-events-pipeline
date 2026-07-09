@@ -101,11 +101,8 @@ class EnrichmentSweep
     return false if model.release_claim(record.id).zero?
 
     discard_beyond_window(record_jobs)
-    reclaimed = model.transaction do
-      model.claim_for_enrichment(record.github_id).tap do |won|
-        job_class.perform_later(record.id) if won
-      end
-    end
+    reclaimed = model.claim_and_enqueue(github_id: record.github_id, job_class: job_class,
+                                        record_id: record.id)
     log(record, reason: reason_for(record_jobs), reclaimed: reclaimed)
     true
   end

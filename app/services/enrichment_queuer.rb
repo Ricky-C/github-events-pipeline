@@ -58,15 +58,7 @@ class EnrichmentQueuer
     end
 
     id = upsert_stub(model, attrs)
-
-    # Claim UPDATE and job INSERT commit or roll back together — Solid
-    # Queue rows live in the same database, and enqueue happens inline
-    # (enqueue_after_transaction_commit = false). See D-023.
-    claimed = model.transaction do
-      model.claim_for_enrichment(attrs[:github_id]).tap do |won|
-        job_class.perform_later(id) if won
-      end
-    end
+    claimed = model.claim_and_enqueue(github_id: attrs[:github_id], job_class: job_class, record_id: id)
 
     if claimed
       log(:info, "enrich.enqueued", entity, attrs[:github_id])

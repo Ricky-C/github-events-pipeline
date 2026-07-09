@@ -11,8 +11,9 @@
 # Solid Queue has no native enqueue-uniqueness, so in-flight dedup is this
 # claim: a single atomic UPDATE that also folds in the TTL gate. Claim and
 # job INSERT commit together in one transaction on the one database
-# (config.active_job.enqueue_after_transaction_commit = false), so there is
-# no window where the status says enqueued but no job exists, or vice versa
+# (ApplicationJob pins enqueue_after_transaction_commit = false, the knob
+# Rails 8.1 ignores at application level — D-024), so there is no window
+# where the status says enqueued but no job exists, or vice versa
 # (docs/DECISIONS.md D-023).
 module Enrichable
   extend ActiveSupport::Concern
@@ -38,6 +39,17 @@ module Enrichable
           ENRICHMENT_TTL.ago
         )
         .update_all(fetch_status: "enqueued", updated_at: Time.current) == 1
+    end
+
+    # The claim UPDATE and its job INSERT commit or roll back together: Solid
+    # Queue's rows live in the same database, and the enqueue happens inline,
+    # so neither half can exist without the other (D-023). Both callers that
+    # start enrichment — the ingest queuer and the sweep — go through here, so
+    # the pairing cannot drift between them.
+    def claim_and_enqueue(github_id:, job_class:, record_id:)
+      transaction do
+        claim_for_enrichment(github_id).tap { |won| job_class.perform_later(record_id) if won }
+      end
     end
 
     # Give-up path (retry exhaustion, unexpected job error): return the row
