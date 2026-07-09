@@ -1,0 +1,5 @@
+# No recurring tasks — enrichment jobs are enqueued by the ingest pipeline,
+# not on a schedule. The file exists (empty) so the Solid Queue supervisor
+# doesn't log a fallback warning at every worker boot.
+development: {}
+test: {}

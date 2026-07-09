@@ -49,5 +49,20 @@ module GithubEventsPipeline
     # Middleware like session, flash, cookies can be added back manually.
     # Skip views, helpers and assets when generating a new resource.
     config.api_only = true
+
+    # Jobs are Postgres rows in the same database as everything else
+    # (docs/DECISIONS.md D-002, D-010). Set explicitly: the development-env
+    # default is the in-process async adapter, which would fake-pass
+    # enrichment without any worker running. Solid Queue itself uses the
+    # primary connection because no `config.solid_queue.connects_to` is set —
+    # that absence is deliberate, not an omission.
+    config.active_job.queue_adapter = :solid_queue
+
+    # The enrichment claim UPDATE and its job INSERT must commit or roll
+    # back together in one transaction on the one database (docs/DECISIONS.md
+    # D-023); deferring enqueue to after-commit would reopen the
+    # crashed-between-claim-and-enqueue window. false is the 8.1 default —
+    # pinned because the claim's atomicity silently depends on it.
+    config.active_job.enqueue_after_transaction_commit = false
   end
 end

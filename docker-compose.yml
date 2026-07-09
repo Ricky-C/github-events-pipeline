@@ -60,10 +60,13 @@ services:
         condition: service_completed_successfully
     restart: unless-stopped
 
-  # Phase 0 stub: Solid Queue and enrichment jobs arrive in Phase 3.
+  # Solid Queue supervisor (dispatcher + one enrichment worker, per
+  # config/queue.yml). Its default 5s shutdown timeout sits inside compose's
+  # 10s stop grace: an in-flight job finishes or its claimed execution is
+  # released and re-dispatched on restart.
   worker:
     <<: *app
-    command: ["bin/rails", "runner", 'Rails.logger.info({component: "worker", event: "boot.ok", rails_env: Rails.env, db: ActiveRecord::Base.connection.select_value("SELECT 1") && "connected", msg: "Solid Queue arrives in Phase 3"}); sleep']
+    command: ["bin/jobs"]
     depends_on:
       migrate:
         condition: service_completed_successfully
