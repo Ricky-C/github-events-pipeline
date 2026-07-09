@@ -32,7 +32,7 @@ RSpec.describe IngestRunner do
     slept = []
     sleeper = lambda do |slice|
       slept << slice
-      runner.instance_variable_set(:@shutdown, true) if served >= responses.size
+      runner.request_shutdown if served >= responses.size
     end
     runner = described_class.new(client: client, ingester: ingester, sleeper: sleeper,
                                  clock: clock, logger: logger, jitter: -> { 0 }, traps: false)
@@ -164,7 +164,7 @@ RSpec.describe IngestRunner do
         ok_result
       end
       runner = nil
-      sleeper = ->(_) { runner.instance_variable_set(:@shutdown, true) if calls >= 2 }
+      sleeper = ->(_) { runner.request_shutdown if calls >= 2 }
       runner = new_runner(sleeper: sleeper)
       runner.run
 
@@ -179,10 +179,31 @@ RSpec.describe IngestRunner do
       allow(client).to receive(:poll_events).and_raise(NoMethodError, "undefined method 'oops'")
       runner = new_runner(sleeper: ->(_) { raise "escalation must not sleep" })
 
-      expect { runner.run }.to raise_error(NoMethodError)
+      # `exit`, not a re-raise: the fatal line must be the process's last
+      # words — rails runner would dump a non-JSON backtrace after a raise.
+      expect { runner.run }.to raise_error(SystemExit) { |e| expect(e.status).to eq(1) }
       expect(logger.messages(:fatal))
         .to contain_exactly(hash_including(event: "poll.escalated", reason: "permanent_error",
                                            error_class: "NoMethodError"))
+      # The trimmed backtrace rides the line; `consecutive` does not — a
+      # permanent error is not a streak, and a stale tally from an earlier
+      # transient run would misattribute it.
+      expect(logger.messages(:fatal).first[:backtrace]).to be_an(Array)
+      expect(logger.messages(:fatal).first).not_to have_key(:consecutive)
+    end
+
+    it "prefers a requested clean shutdown over escalating a pending failure" do
+      # SIGTERM lands, then the in-flight cycle dies: the stop the operator
+      # asked for must not be misreported as a crash and a nonzero exit.
+      allow(client).to receive(:poll_events).and_raise(NoMethodError, "undefined method 'oops'")
+      runner = new_runner(sleeper: ->(_) { })
+      runner.request_shutdown
+
+      expect { runner.run }.not_to raise_error
+      expect(logger.messages(:fatal)).to be_empty
+      expect(logger.messages(:error))
+        .to contain_exactly(hash_including(event: "poll.error", error_class: "NoMethodError"))
+      expect(logger.messages(:info).last).to include(event: "shutdown.clean")
     end
 
     it "escalates once consecutive transient failures exhaust the cap" do
@@ -190,19 +211,35 @@ RSpec.describe IngestRunner do
       allow(client).to receive(:poll_events) { calls += 1; raise transient }
       runner = nil
       # The flag is a leash on the mutant that never escalates: past the cap
-      # it stops the loop so the missing raise fails this spec instead of
+      # it stops the loop so the missing exit fails this spec instead of
       # hanging the suite.
       sleeper = lambda do |_|
-        runner.instance_variable_set(:@shutdown, true) if calls > described_class::MAX_CONSECUTIVE_FAILURES
+        runner.request_shutdown if calls > described_class::MAX_CONSECUTIVE_FAILURES
       end
       runner = new_runner(sleeper: sleeper)
 
-      expect { runner.run }.to raise_error(ActiveRecord::ConnectionNotEstablished)
+      expect { runner.run }.to raise_error(SystemExit) { |e| expect(e.status).to eq(1) }
       expect(calls).to eq(described_class::MAX_CONSECUTIVE_FAILURES)
       expect(logger.messages(:fatal))
         .to contain_exactly(hash_including(event: "poll.escalated",
                                            reason: "transient_failures_exhausted",
                                            consecutive: described_class::MAX_CONSECUTIVE_FAILURES))
+    end
+
+    it "lets a stop requested mid-cycle end a failure streak cleanly at the cap" do
+      calls = 0
+      runner = nil
+      allow(client).to receive(:poll_events) do
+        calls += 1
+        # SIGTERM races the very failure that would hit the cap.
+        runner.request_shutdown if calls == described_class::MAX_CONSECUTIVE_FAILURES
+        raise transient
+      end
+      runner = new_runner(sleeper: ->(_) { })
+
+      expect { runner.run }.not_to raise_error
+      expect(logger.messages(:fatal)).to be_empty
+      expect(logger.messages(:info).last).to include(event: "shutdown.clean")
     end
 
     it "resets the consecutive counter after any completed cycle" do
@@ -218,7 +255,7 @@ RSpec.describe IngestRunner do
         step == :ok ? ok_result : raise(step)
       end
       runner = nil
-      sleeper = ->(_) { runner.instance_variable_set(:@shutdown, true) if served >= sequence.size }
+      sleeper = ->(_) { runner.request_shutdown if served >= sequence.size }
       runner = new_runner(sleeper: sleeper)
 
       expect { runner.run }.not_to raise_error

@@ -17,11 +17,11 @@ RSpec.describe IngestRunner, "chaos checks" do
   end
 
   # Runs the continuous loop until `cycles` poll.cycle lines exist, then
-  # flips the shutdown flag exactly as the runner's own signal trap would.
+  # requests shutdown exactly as the runner's own signal trap would.
   def run_cycles(cycles)
     runner = nil
-    sleeper = ->(_) { runner.instance_variable_set(:@shutdown, true) if cycle_logs.size >= cycles }
-    runner = described_class.new(client: GithubClient.new,
+    sleeper = ->(_) { runner.request_shutdown if cycle_logs.size >= cycles }
+    runner = described_class.new(client: GithubClient.new(logger: logger),
                                  ingester: EventIngester.new(logger: logger),
                                  sleeper: sleeper, clock: clock, logger: logger,
                                  jitter: -> { 0 }, traps: false)
@@ -50,6 +50,8 @@ RSpec.describe IngestRunner, "chaos checks" do
 
     expect { run_cycles(2) }.not_to raise_error
 
+    expect(logger.messages(:warn))
+      .to include(hash_including(event: "body.unparseable", error_class: "JSON::ParserError"))
     expect(cycle_logs.map { |entry| entry[:status] }).to eq(%i[ transient_error ok ])
     expect(logger.messages(:fatal)).to be_empty
   end

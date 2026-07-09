@@ -12,5 +12,9 @@ class GithubClient
     def rate_limited? = status == :rate_limited
     def terminal? = status == :not_found || status == :rejected_url
     def retryable? = status == :transient_error
+
+    # The one rate field callers act on (sleeps, parks, logs) — a reader so
+    # no call site has to know the rate hash's shape.
+    def reset_at = rate&.fetch(:reset_at, nil)
   end
 end

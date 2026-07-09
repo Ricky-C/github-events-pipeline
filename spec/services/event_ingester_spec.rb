@@ -234,13 +234,28 @@ RSpec.describe EventIngester do
       expect(PushEvent.count).to eq(0)
     end
 
-    it "re-raises the batch error when every row is refused (not row-specific)" do
+    it "raises when every row is refused (not row-specific)" do
       allow(RawEvent).to receive(:insert_all)
         .and_raise(ActiveRecord::StatementInvalid.new("server closed the connection"))
 
       expect { ingester.ingest(pushes) }.to raise_error(ActiveRecord::StatementInvalid)
       expect(logger.messages(:warn).map { |entry| entry[:reason] })
         .to all(eq("row_rejected"))
+    end
+
+    it "raises the retry-time error, not the batch's first — classification follows conditions now" do
+      calls = 0
+      # The batch attempt dies on a data shape; every later attempt dies
+      # DB-shaped. What propagates must be the DB-shaped one: the poll loop
+      # classifies by class (D-026, D-028), and the batch error would exit
+      # the process as a permanent bug during what is a database outage.
+      allow(RawEvent).to receive(:insert_all) do
+        calls += 1
+        raise JSON::GeneratorError, "invalid utf-8" if calls == 1
+        raise ActiveRecord::StatementInvalid, "server closed the connection"
+      end
+
+      expect { ingester.ingest(pushes) }.to raise_error(ActiveRecord::StatementInvalid)
     end
 
     it "rejects an id containing NUL upfront without touching the database" do

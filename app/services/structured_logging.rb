@@ -10,9 +10,13 @@ module StructuredLogging
   private
 
   # An injected @logger wins so services keep their constructor seam for
-  # specs; classes without one (GithubClient, jobs) fall back to the app
-  # logger.
+  # specs; classes without one (jobs) fall back to the app logger.
   def log_event(level, event, **fields)
+    # A class that never set `self.log_component = ...` must fail loudly on
+    # its first log, not stamp component:null into every line — D-027
+    # promises the forgotten declaration is a hard error, not silent drift.
+    raise ArgumentError, "#{self.class} must set log_component" if log_component.nil?
+
     logger = @logger || Rails.logger
     logger.public_send(level, { component: log_component, event: event }.merge(fields))
   end

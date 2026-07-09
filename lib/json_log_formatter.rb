@@ -3,9 +3,10 @@ require "logger"
 require "time"
 
 # One JSON object per line to stdout. Hash messages are merged into the
-# entry so services can log structured events directly:
+# entry — call sites reach here through StructuredLogging#log_event, which
+# stamps component and event (D-027):
 #
-#   Rails.logger.info(component: "ingester", event: "poll.cycle", events_seen: 30)
+#   log_event(:info, "poll.cycle", events_seen: 30)
 #
 # String messages become {"msg": "..."} — JSON encoding neutralizes
 # newline/control-character log injection from external strings

@@ -30,6 +30,15 @@ RSpec.describe StructuredLogging do
       .with(hash_including(component: "tester", event: "test.event"))
   end
 
+  it "refuses to log for a class that never declared its component" do
+    # D-027's contract: a forgotten declaration is a hard error on first
+    # log, never a silent component:null on every line.
+    undeclared = Class.new { include StructuredLogging }.new
+
+    expect { undeclared.send(:log_event, :info, "test.event") }
+      .to raise_error(ArgumentError, /log_component/)
+  end
+
   it "inherits the component in subclasses" do
     # Jobs declare their component once on the shared parent; the
     # class_attribute is what carries it down.

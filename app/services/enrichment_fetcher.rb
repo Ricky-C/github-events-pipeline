@@ -50,7 +50,7 @@ class EnrichmentFetcher
     when :rejected_url then reject(record, result)
     when :rate_limited
       park(record, reason: "rate_limited", retry_after: result.retry_after,
-           reset_at: result.rate&.fetch(:reset_at, nil))
+           reset_at: result.reset_at)
     else
       retry_later(record, result)
     end
