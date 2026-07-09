@@ -59,13 +59,15 @@ Convenience predicates: `ok?`, `not_modified?`, `rate_limited?`, `terminal?` (`:
 
 ```ruby
 Budget = Struct.new(:remaining, :reset_at, :updated_at) do
-  def spendable?(reserve: 0)  # false when remaining known and <= reserve
+  def spendable?(reserve: 0, at: Time.current)  # false when remaining known and <= reserve, unless the observed window has rolled by `at`
   def exhausted?              # remaining known and == 0
   def unknown?                # no response observed yet (boot) -> callers act optimistically
 end
 ```
 
-**Policy constants (live with the callers, documented here):** `ENRICHMENT_RESERVE = 5` — enrichment jobs check `budget.spendable?(reserve: ENRICHMENT_RESERVE)` before fetching and park until `reset_at` if not. Polling checks nothing — it has priority by design (D-006), but is capped by `IngestRunner::POLL_FLOOR = 120s` because every poll costs budget, 304s included (D-022).
+**The stale-mirror escape belongs to `spendable?` (D-025).** The mirror only refreshes when a request is made, so a persisted `remaining: 0` whose `reset_at` has already passed must read as spendable — otherwise the caller that would refresh it is the caller waiting on it, and enrichment deadlocks after the first exhaustion. `at:` is the caller's clock; the escape is part of the predicate, not something each caller re-derives.
+
+**Policy constants (live with the callers, documented here):** `ENRICHMENT_RESERVE = 5` — enrichment jobs check `budget.spendable?(reserve: ENRICHMENT_RESERVE, at: now)` before fetching and park until `reset_at` if not. Polling checks nothing — it has priority by design (D-006), but is capped by `IngestRunner::POLL_FLOOR = 120s` because every poll costs budget, 304s included (D-022).
 
 **`GithubClient::RateWindow.clamp(seconds)`** is client-owned, like `UrlGuard`, and bounds every wait a caller derives from a rate header to `MAX_WAIT = 1.hour`, floored at 1s. The one-hour primary window is a fact about the API, so the bound lives with the client; both enrichment park sites and `IngestRunner#until_reset` call it, so it cannot drift (D-024).
 
@@ -144,7 +146,7 @@ loop:
 
 **Enrichment job (Phase 3):**
 ```
-return park(until: now + RateWindow.clamp(budget.reset_at - now || 60) + jitter) unless client.budget.spendable?(reserve: 5)
+return park(until: now + RateWindow.clamp(budget.reset_at - now || 60) + jitter) unless client.budget.spendable?(reserve: 5, at: now)
 r = client.fetch_resource(record.url, etag: record.etag)
 case r.status
 when :ok            -> persist enrichment

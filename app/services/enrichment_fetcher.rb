@@ -35,7 +35,7 @@ class EnrichmentFetcher
 
   def call(record)
     budget = @client.budget
-    unless spendable?(budget)
+    unless budget.spendable?(reserve: ENRICHMENT_RESERVE, at: @clock.now)
       return park(record, reason: "budget", reset_at: budget.reset_at)
     end
 
@@ -54,16 +54,6 @@ class EnrichmentFetcher
   end
 
   private
-
-  # The reserve check alone would deadlock after exhaustion: nothing
-  # refreshes the mirror until some request is made, so a stale
-  # "remaining: 0" would park every job forever (or hot-loop them at a
-  # past reset_at). Once the observed window has rolled, act optimistically —
-  # the first fetch refreshes the mirror either way.
-  def spendable?(budget)
-    budget.spendable?(reserve: ENRICHMENT_RESERVE) ||
-      (budget.reset_at.present? && budget.reset_at <= @clock.now)
-  end
 
   def persist(record, result)
     return reject_body(record, result.body) unless result.body.is_a?(Hash)
