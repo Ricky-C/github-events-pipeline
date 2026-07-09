@@ -8,10 +8,10 @@
 
 ## Acceptance Criteria (from exercise, verbatim)
 
-- [ ] Actor and repository data are retrieved using URLs provided in the event payload
-- [ ] Enriched data is persisted durably
-- [ ] The solution avoids obviously unnecessary repeated fetches
-- [ ] The approach is explained in the design brief
+- [x] Actor and repository data are retrieved using URLs provided in the event payload — `payload.actor.url` / `payload.repo.url`, SSRF-guarded at ingest and again at fetch time
+- [x] Enriched data is persisted durably — `actors.data` / `repositories.data` (jsonb) in Postgres, written inside a savepointed transaction; 103 actors + 100 repositories enriched live
+- [x] The solution avoids obviously unnecessary repeated fetches — 24h TTL gate folded into the atomic claim, per-record conditional ETags, in-flight dedup; max 1 fetch per entity per TTL window, observed live
+- [ ] The approach is explained in the design brief — **Phase 5.** `DESIGN.md` is still a stub by design (doc map: "finalized in Phase 5"); the material it draws on is complete (D-022, D-023, D-024, D-025 + `ARCHITECTURE.md`)
 
 ## Tasks
 
@@ -42,6 +42,23 @@
 - [x] Worker survives restart mid-queue; nothing is lost (Solid Queue in Postgres, plus the D-024 sweep). Two windows, both executed:
   - **Scheduled (parked) job** — restarted with one in queue; it survived, ran post-reset, and no entity was fetched twice. A `scheduled_execution` is a plain row, so this always held.
   - **Claimed job** (never exercised until the review round; the criterion's real subject) — 2026-07-09, worker SIGKILLed mid-fetch, then restarted. Solid Queue pruned the dead process 5 min later and **dead-lettered** the claimed execution with `ProcessPrunedError`; the job kept `finished_at IS NULL` and no execution row, actor 50 stayed `enqueued` with `data` NULL, the budget mirror never moved (the fetch never completed), and a replayed event logged `enrich.skipped reason=in_flight` with zero new jobs. **The enrichment was silently lost.** With `EnrichmentSweep` deployed, the scheduler's next fire reclaimed it: `enrich.swept reason=dead_lettered reclaimed=true` → `enrich.sweep swept:1` → `enrich.success`, 260 ms end to end. Actor 50 settled `fetched` with 33 `data` keys, exactly one `enrich.success` for that entity across the whole run, budget 60 → 59 (one request), the dead-letter row kept as the audit trail, zero failed executions since.
+  - **Re-executed at `f0f9f7a`**, because review round 2 rewrote the very code this criterion exercises — `reclaim` now calls the extracted `Enrichable.claim_and_enqueue`, `beyond_window?` is anchored to `job.created_at`, and `ENTITIES` derives its model from `job_class.record_class`. Same shape, same result, against the refactored sweep:
+
+    ```
+    16:39:06  SIGKILL while a claimed execution existed (container restarts=1)
+    16:39:09  actor 317 enqueued, data NULL; job 1640 finished_at NULL; claim orphaned;
+              failed_executions 1 (nothing dead-lettered it); budget mirror 59, unmoved;
+              claim_for_enrichment(583231) => false
+    16:44:16  Process.prune -> job 1640 dead-lettered (ProcessPrunedError), finished_at NULL;
+              actor 317 STILL enqueued
+    16:45:00  the recurring */15 sweep fires on its own (not triggered by hand):
+              enrich.swept reason=dead_lettered reclaimed=true -> enrich.sweep swept:1
+              -> enrich.success (+310 ms)
+    16:45:07  actor 317 fetched, 33 data keys, real weak ETag; mirror 59 -> 58 (one request);
+              failed_executions 2 (dead-letter row preserved); retry/retry_exhausted/sweep_aborted: 0
+    ```
+
+    `enrich.sweep_aborted: 0` is the live corroboration of the new fail-safe's assumption: the sweep read the record id out of a real Active Job envelope, exactly as the canary spec asserts against the real Solid Queue adapter (D-025).
   - The guarantee is *at-least-once*, not "no lost or duplicated": a graceful restart mid-fetch re-runs the job once (`shutdown_timeout` 20s > the 15s worst-case fetch, so the fork releases its claim rather than racing the supervisor's SIGQUIT to dead-letter it). Persists are idempotent `update!`s; the cost is one wasted request, and it is the right trade against losing the entity (D-024).
 
 ## Out of Scope
