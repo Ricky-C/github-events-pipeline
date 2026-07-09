@@ -80,14 +80,18 @@ class EnrichmentQueuer
     end
   end
 
-  # Identity columns only, and url only when the guard passed it: a hostile
-  # event must never null out or replace a previously stored good URL, and
-  # the enrichment columns (data/etag/fetched_at/fetch_status) are never in
+  # Identity columns only, and only the ones this event actually supplied: a
+  # nil means "this event told us nothing", never "erase what we know". The
+  # url arrives nil when the guard refused it, avatar_url when it failed
+  # StorableString or the payload simply omitted it — neither may overwrite a
+  # stored good value (D-024 generalizes what D-023 protected only for url).
+  # The enrichment columns (data/etag/fetched_at/fetch_status) are never in
   # the update set, so a stub refresh can't clobber fetch state. Unlike the
   # push_events insert-ignore (D-021), this is a genuine DO UPDATE — logins
   # and repo names change on rename and the latest identity should win.
+  # login/full_name are parser-guaranteed present, so the set is never empty.
   def upsert_stub(model, attrs)
-    update_only = attrs.keys - [ :github_id ] - (attrs[:url] ? [] : [ :url ])
+    update_only = attrs.compact.keys - [ :github_id ]
     model.upsert(attrs, unique_by: :github_id, update_only: update_only,
                         record_timestamps: true, returning: %i[id]).rows.first.first
   end
@@ -111,10 +115,15 @@ class EnrichmentQueuer
   # (.../users/github-actions[bot]) — RFC 3986 forbids them, so URI.parse
   # (and therefore the guard) rejects the URL as served. Percent-encode
   # exactly those two characters: the escaped form names the same resource
-  # and GitHub accepts it, while brackets can't smuggle authority tricks —
-  # encoded in host position they simply fail the exact-host match. Bots
-  # dominate the firehose (D-005); rejecting them would exclude the most
-  # common actors from enrichment (D-023).
+  # and GitHub accepts it. Escaping the whole URL is safe because no bracket
+  # survives it: RFC 3986 allows `[`/`]` only as the delimiters of an
+  # IP-literal host, and `%5B`/`%5D` contain none of `: @ / ? #`, so the
+  # substitution can neither introduce nor remove an authority boundary. The
+  # authority can then only be a reg-name or IPv4 — never an IPv6 literal —
+  # and a host that held a bracket only grows further from `api.github.com`.
+  # Idempotent, too: an already-encoded `%5B` is untouched. Bots dominate the
+  # firehose (D-005); rejecting them would exclude the most common actors
+  # from enrichment (D-023, D-024).
   def normalize_brackets(url)
     url.to_s.gsub("[", "%5B").gsub("]", "%5D")
   end

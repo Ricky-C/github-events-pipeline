@@ -84,6 +84,50 @@ RSpec.describe EnrichmentQueuer do
       expect(actor.avatar_url).to be_nil
       expect(actor.fetch_status).to eq("enqueued")
     end
+
+    # The escape is a whole-URL gsub, so it must be a fixed point: a payload
+    # already carrying the encoded form has to survive it unchanged, or the
+    # firehose's most common actors would double-encode to %255B and 404.
+    it "leaves an already-escaped bot URL untouched" do
+      event = GithubFixtures.first_push.deep_dup
+      event["actor"]["url"] = "https://api.github.com/users/dependabot%5Bbot%5D"
+
+      queuer.call(rows_for([ event ]))
+
+      actor = Actor.find_by!(github_id: first_actor["id"])
+      expect(actor.url).to eq("https://api.github.com/users/dependabot%5Bbot%5D")
+      expect(actor.fetch_status).to eq("enqueued")
+    end
+  end
+
+  # The escape runs before the guard, on the whole URL. Escaping cannot build
+  # an authority: `[` and `]` are legal only inside an IPv6 literal, and the
+  # escaped form has no brackets at all, so the host can only be a reg-name or
+  # an IPv4 address — never `api.github.com` unless it already was (D-023).
+  describe "the bracket escape cannot smuggle an authority" do
+    def actor_url_event(url)
+      event = GithubFixtures.first_push.deep_dup
+      event["actor"]["url"] = url
+      event
+    end
+
+    [
+      [ "an IPv6 loopback literal", "https://[::1]/latest/meta-data" ],
+      [ "an IPv4-mapped IPv6 literal", "https://[::ffff:169.254.169.254]/latest/meta-data" ],
+      [ "a bracket-wrapped real host", "https://[api.github.com]/users/x" ],
+      [ "a bracketed userinfo trick", "https://api.github.com]@evil.com/users/x" ]
+    ].each do |description, url|
+      it "rejects #{description}" do
+        queuer.call(rows_for([ actor_url_event(url) ]))
+
+        actor = Actor.find_by!(github_id: first_actor["id"])
+        expect(actor.url).to be_nil
+        expect(actor.fetch_status).to eq("pending")
+        expect(entries(:error, "security.url_rejected").first).to include(entity: "actor")
+        expect(enqueued_classes).not_to include("EnrichActorJob")
+        expect(WebMock).not_to have_requested(:get, /./)
+      end
+    end
   end
 
   describe "TTL gate" do
@@ -134,6 +178,32 @@ RSpec.describe EnrichmentQueuer do
   end
 
   describe "stub refresh semantics" do
+    # A nil identity value means "this event told us nothing", never "erase
+    # what we know" — the protection D-023 gave url, generalized (D-024).
+    it "keeps a stored avatar_url when a later event omits it" do
+      Actor.create!(github_id: first_actor["id"], login: first_actor["login"],
+                    url: first_actor["url"], avatar_url: "https://avatars.githubusercontent.com/u/1?v=4")
+      event = GithubFixtures.first_push.deep_dup
+      event["actor"].delete("avatar_url")
+
+      queuer.call(rows_for([ event ]))
+
+      expect(Actor.find_by!(github_id: first_actor["id"]).avatar_url)
+        .to eq("https://avatars.githubusercontent.com/u/1?v=4")
+    end
+
+    it "keeps a stored avatar_url when a later event carries an unstorable one" do
+      Actor.create!(github_id: first_actor["id"], login: first_actor["login"],
+                    url: first_actor["url"], avatar_url: "https://avatars.githubusercontent.com/u/1?v=4")
+      event = GithubFixtures.first_push.deep_dup
+      event["actor"]["avatar_url"] = "https://avatars.githubusercontent.com/#{"a" * 300}"
+
+      queuer.call(rows_for([ event ]))
+
+      expect(Actor.find_by!(github_id: first_actor["id"]).avatar_url)
+        .to eq("https://avatars.githubusercontent.com/u/1?v=4")
+    end
+
     it "updates identity columns and never touches enrichment state" do
       existing = Actor.create!(github_id: first_actor["id"], login: "pre-rename",
                                url: "https://api.github.com/users/pre-rename",
