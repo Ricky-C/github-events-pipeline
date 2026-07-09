@@ -83,6 +83,18 @@ RSpec.describe IngestRunner do
       expect(cycle_logs.last[:sleep_for]).to eq(120)
     end
 
+    it "narrates a rate-limited cycle with its own event, alongside the cycle line" do
+      run_loop([ result(:rate_limited, retry_after: 90,
+                        rate: { remaining: 0, reset_at: now + 120 }) ])
+
+      expect(logger.messages(:info))
+        .to include(hash_including(event: "poll.rate_limited", reset_at: now + 120,
+                                   retry_after: 90, sleep_for: 90))
+      # The cycle line still fires — poll.rate_limited is an overlay, so the
+      # per-cycle count reconciliation stays intact.
+      expect(cycle_logs.last).to include(status: :rate_limited, sleep_for: 90)
+    end
+
     it "uses retry-after when rate-limited without a reset time" do
       run_loop([ result(:rate_limited, retry_after: 90) ])
       expect(cycle_logs.last[:sleep_for]).to eq(90)

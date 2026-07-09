@@ -117,6 +117,16 @@ class IngestRunner
     counts = result.ok? ? @ingester.ingest(result.body) : EventIngester.empty_counts
     wait = wait_for(result)
 
+    if result.rate_limited?
+      # Its own info line, on top of poll.cycle: an exhausted shared budget
+      # is the system working as designed, and an operator scanning logs
+      # must be able to tell that apart from an error without decoding
+      # cycle fields. The README's verify section points at this event.
+      @logger.info(component: "ingester", event: "poll.rate_limited",
+                   reset_at: result.rate&.fetch(:reset_at, nil),
+                   retry_after: result.retry_after, sleep_for: wait)
+    end
+
     @logger.info({
       component: "ingester", event: "poll.cycle", status: result.status,
       not_modified: result.not_modified?,
