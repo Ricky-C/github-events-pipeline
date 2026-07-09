@@ -34,11 +34,11 @@
 
 ## Exit Criteria
 
-- [ ] End-to-end: ingest → jobs enqueued → actors/repos rows gain enrichment `data` + `fetched_at`
-- [ ] Same actor appearing in many pushes triggers ≤1 fetch per TTL window (visible in logs)
-- [ ] With budget forced to 0 (test/fixture), jobs park and later run — no failures, no crash-loop
-- [ ] A fixture payload with a non-github URL is rejected by the SSRF guard with a security log line
-- [ ] Worker survives restart mid-queue; no lost or duplicated enrichment (Solid Queue in Postgres)
+- [x] End-to-end: ingest → jobs enqueued → actors/repos rows gain enrichment `data` + `fetched_at` — executed live 2026-07-09: 103 actors + 100 repositories enriched with full `data` jsonb across two budget windows; one real deleted repo landed `not_found` terminally
+- [x] Same actor appearing in many pushes triggers ≤1 fetch per TTL window (visible in logs) — max `enrich.success` count per entity over the whole run: 1; 24 `enrich.cache_hit` lines for repeats
+- [x] With budget forced to 0 (test/fixture), jobs park and later run — no failures, no crash-loop — spec-covered (forced 0), and observed live with *real* exhaustion: enrichment drained to the reserve, parked to reset+jitter, the backlog ran at window rollover, drained the fresh window to the reserve again, and re-parked to the next reset; 0 failed executions
+- [x] A fixture payload with a non-github URL is rejected by the SSRF guard with a security log line — committed fixture `events_page_with_hostile_url.json` + queuer spec assert `security.url_rejected`, NULL url, zero jobs, zero HTTP
+- [x] Worker survives restart mid-queue; no lost or duplicated enrichment (Solid Queue in Postgres) — restarted with a scheduled (parked) job in queue; it survived, ran post-reset, and no entity was fetched twice
 
 ## Out of Scope
 
