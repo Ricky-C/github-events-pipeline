@@ -21,7 +21,7 @@ RSpec.describe EnrichmentQueuer do
   end
 
   def entries(level, event)
-    logger.messages(level).select { |message| message[:event] == event }
+    logger.messages(level, event: event)
   end
 
   def enqueued_classes

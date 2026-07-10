@@ -37,31 +37,26 @@ RSpec.describe IngestRunner, "full ingest cycle" do
       .run(once: true)
   end
 
-  def entries(level, event)
-    logger.messages(level).select { |message| message[:event] == event }
-  end
-
   def cycle_logs
-    entries(:info, "poll.cycle")
+    logger.messages(:info, event: "poll.cycle")
   end
 
   describe "one poll through the real composition" do
     before { run_once }
 
     it "persists every fixture PushEvent raw and structured" do
+      # Row sets only: the field mapping is event_ingester_spec's wiring
+      # probe and the parser spec's matrix — re-pinning it here would give
+      # every attribute change two failures for one cause.
       expect(RawEvent.pluck(:github_event_id)).to match_array(pushes.map { |event| event["id"] })
-      expect(RawEvent.distinct.pluck(:event_type)).to eq([ "PushEvent" ])
       expect(PushEvent.pluck(:github_event_id)).to match_array(pushes.map { |event| event["id"] })
-
-      # One wiring probe — the field mapping itself is the parser spec's job.
-      first = GithubFixtures.first_push
-      expect(PushEvent.find_by!(github_event_id: first["id"]))
-        .to have_attributes(PushEventParser.call(first).attributes)
     end
 
     it "stubs and enqueues exactly one enrichment job per unique entity" do
-      expect(Actor.count).to eq(actor_ids.size)
-      expect(Repository.count).to eq(repo_ids.size)
+      # Identity anchors to the fixture, not just counts: a seam bug pairing
+      # the wrong event's actor/repo per stub would keep every count green.
+      expect(Actor.pluck(:github_id)).to match_array(actor_ids)
+      expect(Repository.pluck(:github_id)).to match_array(repo_ids)
       expect(Actor.distinct.pluck(:fetch_status)).to eq([ "enqueued" ])
       expect(Repository.distinct.pluck(:fetch_status)).to eq([ "enqueued" ])
 
@@ -79,11 +74,15 @@ RSpec.describe IngestRunner, "full ingest cycle" do
                        duplicates_skipped: 0, malformed_skipped: 0, structured_skipped: 0,
                        budget_remaining: GithubFixtures.header(:events_200, "x-ratelimit-remaining").to_i,
                        # The fixture serves X-Poll-Interval 60; the budget
-                       # floor wins (D-022).
-                       sleep_for: IngestRunner::POLL_FLOOR)
+                       # floor wins. A literal, not IngestRunner::POLL_FLOOR:
+                       # this is the suite's one pin of D-022's 120s policy
+                       # value, and sourcing it from the constant under test
+                       # would let the expectation move with the mutation
+                       # (D-025's methodological note).
+                       sleep_for: 120)
       )
 
-      enqueued = entries(:info, "enrich.enqueued")
+      enqueued = logger.messages(:info, event: "enrich.enqueued")
       expect(enqueued.count { |entry| entry[:entity] == "actor" }).to eq(actor_ids.size)
       expect(enqueued.count { |entry| entry[:entity] == "repository" }).to eq(repo_ids.size)
 
@@ -94,18 +93,22 @@ RSpec.describe IngestRunner, "full ingest cycle" do
   end
 
   describe "restart safety" do
-    # created_at/updated_at are deliberately absent from the snapshot: the
-    # identity-refresh stub upsert and the rate-mirror upsert bump them on
-    # every run by design (D-024). Everything a reader consumes is compared.
+    # Exclusion-based on purpose: every column is compared except the two the
+    # identity-refresh stub upsert and the rate-mirror upsert bump on every
+    # run by design (D-024) — so a column added later is snapshotted by
+    # default instead of silently escaping the replay contract.
+    REPLAY_MUTABLE = %w[ created_at updated_at ].freeze
+
+    def replay_stable(relation, order_by)
+      relation.order(order_by).map { |row| row.attributes.except("id", *REPLAY_MUTABLE) }
+    end
+
     def db_snapshot
-      { raw: RawEvent.order(:github_event_id)
-                     .pluck(:github_event_id, :event_type, :payload, :received_at),
-        push: PushEvent.order(:github_event_id).map { |row| row.attributes.except("id") },
-        actors: Actor.order(:github_id).pluck(:github_id, :login, :url, :avatar_url,
-                                              :fetch_status, :fetched_at, :etag, :data),
-        repositories: Repository.order(:github_id).pluck(:github_id, :full_name, :url,
-                                                         :fetch_status, :fetched_at, :etag, :data),
-        rate: RateLimitState.current&.slice(:etag, :remaining, :reset_at, :poll_interval),
+      { raw: replay_stable(RawEvent.all, :github_event_id),
+        push: replay_stable(PushEvent.all, :github_event_id),
+        actors: replay_stable(Actor.all, :github_id),
+        repositories: replay_stable(Repository.all, :github_id),
+        rate: RateLimitState.current&.attributes&.except("id", *REPLAY_MUTABLE),
         jobs: enqueued_jobs.map { |job| [ job["job_class"], job["arguments"] ] }.sort }
     end
 
@@ -127,7 +130,7 @@ RSpec.describe IngestRunner, "full ingest cycle" do
       # every enrichment claim skipped as already in flight.
       expect(cycle_logs.map { |entry| entry.values_at(:status, :push_events_new, :duplicates_skipped) })
         .to eq([ [ :ok, pushes.size, 0 ], [ :ok, 0, pushes.size ] ])
-      skips = entries(:info, "enrich.skipped")
+      skips = logger.messages(:info, event: "enrich.skipped")
       expect(skips.size).to eq(actor_ids.size + repo_ids.size)
       expect(skips.map { |entry| entry[:reason] }.uniq).to eq([ "in_flight" ])
 
