@@ -10,7 +10,7 @@ RSpec.describe EnrichmentSweep do
 
   before { freeze_time }
 
-  def swept_entries = logger.messages(:warn).select { |message| message[:event] == "enrich.swept" }
+  def swept_entries = logger.messages(:warn, event: "enrich.swept")
 
   # What EnrichmentFetcher#park_at can actually produce, spelled out from its
   # own constants so the sweep's bound is checked against the park math rather
@@ -206,7 +206,7 @@ RSpec.describe EnrichmentSweep do
     end
 
     def aborted_entries
-      logger.messages(:error).select { |message| message[:event] == "enrich.sweep_aborted" }
+      logger.messages(:error, event: "enrich.sweep_aborted")
     end
 
     {

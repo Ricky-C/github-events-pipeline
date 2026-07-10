@@ -32,8 +32,6 @@ docker compose run --rm test
 
 ## How to Verify It's Working
 
-<!-- Finalized in Phase 4 — structure locked now, examples filled from real runs -->
-
 **1. Watch the logs** (`docker compose logs -f`):
 
 Within the first minute you should see:

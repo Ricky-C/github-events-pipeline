@@ -41,7 +41,7 @@ RSpec.describe IngestRunner do
   end
 
   def cycle_logs
-    logger.messages(:info).select { |entry| entry[:event] == "poll.cycle" }
+    logger.messages(:info, event: "poll.cycle")
   end
 
   describe "cadence policy" do

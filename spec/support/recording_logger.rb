@@ -10,8 +10,14 @@ class RecordingLogger
     define_method(severity) { |message| @entries << [ severity, message ] }
   end
 
-  def messages(severity = nil)
+  # event: filters structured entries by their :event key — the one log-shape
+  # assumption, kept here so every spec filters the same way instead of
+  # hand-rolling per-file copies that can drift from the entry shape.
+  def messages(severity = nil, event: nil)
     selected = severity ? @entries.select { |sev, _| sev == severity } : @entries
+    # is_a?(Hash): the recorder stands in for the whole Logger interface, so a
+    # plain-String line must filter out, not raise TypeError from String#[].
+    selected = selected.select { |_, message| message.is_a?(Hash) && message[:event] == event } if event
     selected.map { |_, message| message }
   end
 end

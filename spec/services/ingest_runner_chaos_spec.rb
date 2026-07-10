@@ -13,7 +13,7 @@ RSpec.describe IngestRunner, "chaos checks" do
   let(:clock) { class_double(Time, now: reset_at - 120) }
 
   def cycle_logs
-    logger.messages(:info).select { |entry| entry[:event] == "poll.cycle" }
+    logger.messages(:info, event: "poll.cycle")
   end
 
   # Runs the continuous loop until `cycles` poll.cycle lines exist, then

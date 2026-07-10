@@ -20,10 +20,6 @@ RSpec.describe EnrichmentQueuer do
     end
   end
 
-  def entries(level, event)
-    logger.messages(level).select { |message| message[:event] == event }
-  end
-
   def enqueued_classes
     enqueued_jobs.map { |job| job["job_class"] }
   end
@@ -44,7 +40,7 @@ RSpec.describe EnrichmentQueuer do
       expect(Actor.distinct.pluck(:fetch_status)).to eq([ "enqueued" ])
       expect(enqueued_classes.count("EnrichActorJob")).to eq(unique_actors.size)
       expect(enqueued_classes.count("EnrichRepositoryJob")).to eq(unique_repos.size)
-      expect(entries(:info, "enrich.enqueued").size).to eq(unique_actors.size + unique_repos.size)
+      expect(logger.messages(:info, event: "enrich.enqueued").size).to eq(unique_actors.size + unique_repos.size)
     end
   end
 
@@ -123,7 +119,7 @@ RSpec.describe EnrichmentQueuer do
         actor = Actor.find_by!(github_id: first_actor["id"])
         expect(actor.url).to be_nil
         expect(actor.fetch_status).to eq("pending")
-        expect(entries(:error, "security.url_rejected").first).to include(entity: "actor")
+        expect(logger.messages(:error, event: "security.url_rejected").first).to include(entity: "actor")
         expect(enqueued_classes).not_to include("EnrichActorJob")
         expect(WebMock).not_to have_requested(:get, /./)
       end
@@ -148,8 +144,8 @@ RSpec.describe EnrichmentQueuer do
         actor = Actor.find_by!(github_id: first_actor["id"])
         expect(actor.url).to be_nil
         expect(actor.fetch_status).to eq("pending")
-        expect(entries(:error, "security.url_rejected")).to be_empty
-        expect(entries(:info, "enrich.skipped").first).to include(entity: "actor", reason: "no_url")
+        expect(logger.messages(:error, event: "security.url_rejected")).to be_empty
+        expect(logger.messages(:info, event: "enrich.skipped").first).to include(entity: "actor", reason: "no_url")
         expect(enqueued_classes).not_to include("EnrichActorJob")
       end
     end
@@ -164,7 +160,7 @@ RSpec.describe EnrichmentQueuer do
 
       expect(enqueued_classes).not_to include("EnrichActorJob")
       expect(enqueued_classes).to include("EnrichRepositoryJob")
-      expect(entries(:info, "enrich.cache_hit").first)
+      expect(logger.messages(:info, event: "enrich.cache_hit").first)
         .to include(entity: "actor", github_id: first_actor["id"])
     end
 
@@ -188,7 +184,7 @@ RSpec.describe EnrichmentQueuer do
       queuer.call(rows_for([ GithubFixtures.first_push ]))
 
       expect(enqueued_classes).not_to include("EnrichActorJob")
-      expect(entries(:info, "enrich.skipped").first).to include(reason: "in_flight")
+      expect(logger.messages(:info, event: "enrich.skipped").first).to include(reason: "in_flight")
     end
 
     it "never enqueues a terminal entity" do
@@ -198,7 +194,7 @@ RSpec.describe EnrichmentQueuer do
       queuer.call(rows_for([ GithubFixtures.first_push ]))
 
       expect(enqueued_classes).not_to include("EnrichActorJob")
-      expect(entries(:info, "enrich.skipped").first).to include(reason: "not_found")
+      expect(logger.messages(:info, event: "enrich.skipped").first).to include(reason: "not_found")
     end
   end
 
@@ -261,10 +257,10 @@ RSpec.describe EnrichmentQueuer do
       expect(actor.fetch_status).to eq("pending")
       expect(enqueued_classes).not_to include("EnrichActorJob")
       expect(enqueued_classes).to include("EnrichRepositoryJob")
-      rejection = entries(:error, "security.url_rejected").first
+      rejection = logger.messages(:error, event: "security.url_rejected").first
       expect(rejection).to include(entity: "actor", github_id: actor.github_id)
       expect(rejection[:detail]).to include("169.254.169.254")
-      expect(entries(:info, "enrich.skipped").first).to include(reason: "no_url")
+      expect(logger.messages(:info, event: "enrich.skipped").first).to include(reason: "no_url")
       expect(WebMock).not_to have_requested(:get, /./)
     end
 
