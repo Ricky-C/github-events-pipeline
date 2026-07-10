@@ -8,13 +8,13 @@ Extension D (testing strategy) implemented; Extensions A & B — already structu
 
 ## Tasks — Extension D: Testing Strategy
 
-- [ ] Unit coverage confirmed/extended:
-  - [ ] `GithubClient`: ETag/304 handling, poll-interval respect, budget accounting, 403 sleep math
-  - [ ] TTL cache gate + in-flight dedup logic
-  - [ ] `PushEventParser`: happy path + malformed matrix
-  - [ ] SSRF URL guard (allow/deny table)
-- [ ] Integration spec: full ingest cycle against WebMock'd fixtures (captured real `/events` JSON) → asserts raw rows, structured rows, enqueued jobs, log events
-- [ ] One restart-safety spec: run ingestion twice over identical fixtures → identical DB state
+- [x] Unit coverage confirmed/extended — confirmed; all four areas were already covered, no gaps to extend:
+  - [x] `GithubClient`: ETag/304 handling, poll-interval respect, budget accounting, 403 sleep math *(poll_events_spec.rb — weak-ETag echo, header-less vs header-carrying 304s, the unstorable-ETag matrix; budget_spec.rb — reserve boundary + stale-mirror escape; rate_window_spec.rb — clamp/precedence sleep math; the 120s floor is the runner's policy and lives in ingest_runner_spec.rb § cadence policy)*
+  - [x] TTL cache gate + in-flight dedup logic *(enrichable_spec.rb — claim wins at most once per window; enrichable_concurrency_spec.rb — claim/enqueue atomicity on the real adapter; enrichment_queuer_spec.rb — cache_hit / in_flight behavior)*
+  - [x] `PushEventParser`: happy path + malformed matrix *(push_event_parser_spec.rb — data-driven matrix, ~33 malformed shapes incl. the created_at sub-matrix and the payload_scrubbed rebuild guard)*
+  - [x] SSRF URL guard (allow/deny table) *(fetch_resource_spec.rb — 11-row deny table asserting `:rejected_url` + zero requests, plus bracket normalization and redirect re-guarding; enrichment_queuer_spec.rb — hostile-URL fixture at ingest. Deliberately no dedicated url_guard_spec: the table already exercises the guard through the seam production uses, and a second copy of the table is the drift D-025 exists to prevent)*
+- [x] Integration spec: full ingest cycle against WebMock'd fixtures (captured real `/events` JSON) → asserts raw rows, structured rows, enqueued jobs, log events *(spec/integration/ingest_cycle_spec.rb — real GithubClient + EventIngester + EnrichmentQueuer through `IngestRunner#run(once: true)`; every count derived from the fixture, never a literal)*
+- [x] One restart-safety spec: run ingestion twice over identical fixtures → identical DB state *(same file — two freshly composed runners, snapshot equality across raw/structured/entities/rate-mirror/jobs excluding the upsert-bumped timestamps (D-024), plus non-vacuousness pins: run 2 really sent If-None-Match, deduped the full page, and skipped every claim as in_flight)*
 - [ ] `docker compose run --rm test` green from clean checkout
 - [ ] "What I tested and why" section drafted (goes in brief + PR body): tested the *decision logic* (budget, dedup, parsing) not the framework; skipped exhaustive model specs deliberately
 
