@@ -16,16 +16,16 @@ Extension D (testing strategy) implemented; Extensions A & B — already structu
 - [x] Integration spec: full ingest cycle against WebMock'd fixtures (captured real `/events` JSON) → asserts raw rows, structured rows, enqueued jobs, log events *(spec/integration/ingest_cycle_spec.rb — real GithubClient + EventIngester + EnrichmentQueuer through `IngestRunner#run(once: true)`; every count derived from the fixture, never a literal)*
 - [x] One restart-safety spec: run ingestion twice over identical fixtures → identical DB state *(same file — two freshly composed runners, snapshot equality across raw/structured/entities/rate-mirror/jobs excluding the upsert-bumped timestamps (D-024), plus non-vacuousness pins: run 2 really sent If-None-Match, deduped the full page, and skipped every claim as in_flight)*
 - [ ] `docker compose run --rm test` green from clean checkout
-- [ ] "What I tested and why" section drafted (goes in brief + PR body): tested the *decision logic* (budget, dedup, parsing) not the framework; skipped exhaustive model specs deliberately
+- [x] "What I tested and why" section drafted (goes in brief + PR body): tested the *decision logic* (budget, dedup, parsing) not the framework; skipped exhaustive model specs deliberately *(DESIGN.md § What I Tested and Why; reused in the PR body)*
 
 ## Tasks — Design Brief (`DESIGN.md`, 1–2 pages hard cap)
 
-- [ ] How I understood the problem (2–3 sentences; the rate budget as the central constraint; unattended internal service for an EdTech org's engineering analytics)
-- [ ] Architecture (small diagram + component paragraph, lifted from docs/ARCHITECTURE.md)
-- [ ] Key tradeoffs & assumptions (from docs/DECISIONS.md: Solid Queue over Sidekiq/Redis, polling over webhooks, columns over JSON views, 24h TTL, concurrency=1 worker)
-- [ ] Rate limits & durability (Extension A + B narrative: ETag/304s, X-Poll-Interval, budget gate + parking; unique-index idempotency, transactional writes, Postgres-backed queue restart safety)
-- [ ] What I intentionally did not build (from docs/PLAN.md's out-of-scope list, with one-line reasons)
-- [ ] Length check: ≤2 pages. Cut ruthlessly; link to docs/ARCHITECTURE.md for depth.
+- [x] How I understood the problem (2–3 sentences; the rate budget as the central constraint; unattended internal service for an EdTech org's engineering analytics)
+- [x] Architecture (small diagram + component paragraph, lifted from docs/ARCHITECTURE.md)
+- [x] Key tradeoffs & assumptions (from docs/DECISIONS.md: Solid Queue over Sidekiq/Redis, polling over webhooks, columns over JSON views, 24h TTL, concurrency=1 worker)
+- [x] Rate limits & durability (Extension A + B narrative: ETag/304s, X-Poll-Interval, budget gate + parking; unique-index idempotency, transactional writes, Postgres-backed queue restart safety)
+- [x] What I intentionally did not build (from docs/PLAN.md's out-of-scope list, with one-line reasons)
+- [x] Length check: ≤2 pages. Cut ruthlessly; link to docs/ARCHITECTURE.md for depth. *(999 words including the diagram; a "What I Tested and Why" section was added so Extension D has a brief-section anchor, per the exit criterion's traceability requirement)*
 
 ## Tasks — README Final Pass
 
