@@ -30,9 +30,9 @@ Extension D (testing strategy) implemented; Extensions A & B — already structu
 ## Tasks — README Final Pass
 
 - [ ] All three reviewer commands re-verified from a genuinely clean checkout (fresh clone, pruned Docker cache)
-- [ ] "How to verify it's working" complete with real log excerpts and SQL
-- [ ] Doc map + link to DESIGN.md at top
-- [ ] Spell-check, link-check, remove any TODO/placeholder text project-wide
+- [x] "How to verify it's working" complete with real log excerpts and SQL *(filled from real runs in Phase 4; the structure-lock comment above it was the last placeholder and is now removed)*
+- [x] Doc map + link to DESIGN.md at top *(README line 5 carries brief/deep-dive/plan links; project-structure table maps the rest)*
+- [x] Spell-check, link-check, remove any TODO/placeholder text project-wide *(hunspell over README/DESIGN/docs — only jargon and identifiers flagged; every relative markdown link resolves; grep for TODO/FIXME/TBD/HTML comments is clean)*
 
 ## Exit Criteria
 
