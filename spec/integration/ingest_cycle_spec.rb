@@ -62,9 +62,11 @@ RSpec.describe IngestRunner, "full ingest cycle" do
 
       expect(enqueued_jobs.map { |job| job["job_class"] }.tally)
         .to eq("EnrichActorJob" => actor_ids.size, "EnrichRepositoryJob" => repo_ids.size)
-      actor_args = enqueued_jobs.select { |job| job["job_class"] == "EnrichActorJob" }
-                                .map { |job| job["arguments"] }
-      expect(actor_args).to match_array(Actor.pluck(:id).map { |id| [ id ] })
+      { "EnrichActorJob" => Actor, "EnrichRepositoryJob" => Repository }.each do |job_class, model|
+        args = enqueued_jobs.select { |job| job["job_class"] == job_class }
+                            .map { |job| job["arguments"] }
+        expect(args).to match_array(model.pluck(:id).map { |id| [ id ] })
+      end
     end
 
     it "narrates the cycle to the operator and stays clean" do
@@ -97,10 +99,12 @@ RSpec.describe IngestRunner, "full ingest cycle" do
     # identity-refresh stub upsert and the rate-mirror upsert bump on every
     # run by design (D-024) — so a column added later is snapshotted by
     # default instead of silently escaping the replay contract.
-    REPLAY_MUTABLE = %w[ created_at updated_at ].freeze
+    # A method, not a constant: assigning a constant inside a describe block
+    # defines it on Object, leaking it to the whole suite.
+    def replay_mutable = %w[ created_at updated_at ]
 
     def replay_stable(relation, order_by)
-      relation.order(order_by).map { |row| row.attributes.except("id", *REPLAY_MUTABLE) }
+      relation.order(order_by).map { |row| row.attributes.except("id", *replay_mutable) }
     end
 
     def db_snapshot
@@ -108,7 +112,7 @@ RSpec.describe IngestRunner, "full ingest cycle" do
         push: replay_stable(PushEvent.all, :github_event_id),
         actors: replay_stable(Actor.all, :github_id),
         repositories: replay_stable(Repository.all, :github_id),
-        rate: RateLimitState.current&.attributes&.except("id", *REPLAY_MUTABLE),
+        rate: RateLimitState.current&.attributes&.except("id", *replay_mutable),
         jobs: enqueued_jobs.map { |job| [ job["job_class"], job["arguments"] ] }.sort }
     end
 
@@ -127,9 +131,11 @@ RSpec.describe IngestRunner, "full ingest cycle" do
         .with(headers: { "If-None-Match" => GithubFixtures.header(:events_200, "etag") }).once
 
       # ...and the second cycle did full-page work: every raw row deduped,
-      # every enrichment claim skipped as already in flight.
-      expect(cycle_logs.map { |entry| entry.values_at(:status, :push_events_new, :duplicates_skipped) })
-        .to eq([ [ :ok, pushes.size, 0 ], [ :ok, 0, pushes.size ] ])
+      # every enrichment claim skipped as already in flight. Run one's own
+      # narration is the first block's example — one cause, one failure.
+      expect(cycle_logs.size).to eq(2)
+      expect(cycle_logs.last.values_at(:status, :push_events_new, :duplicates_skipped))
+        .to eq([ :ok, 0, pushes.size ])
       skips = logger.messages(:info, event: "enrich.skipped")
       expect(skips.size).to eq(actor_ids.size + repo_ids.size)
       expect(skips.map { |entry| entry[:reason] }.uniq).to eq([ "in_flight" ])

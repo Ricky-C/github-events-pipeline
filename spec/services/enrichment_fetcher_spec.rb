@@ -16,7 +16,7 @@ RSpec.describe EnrichmentFetcher do
   before { freeze_time }
 
   def entry(level, event)
-    logger.messages(level).find { |message| message[:event] == event }
+    logger.messages(level, event: event).first
   end
 
   describe ":ok" do

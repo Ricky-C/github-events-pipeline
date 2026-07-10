@@ -15,7 +15,9 @@ class RecordingLogger
   # hand-rolling per-file copies that can drift from the entry shape.
   def messages(severity = nil, event: nil)
     selected = severity ? @entries.select { |sev, _| sev == severity } : @entries
-    selected = selected.select { |_, message| message[:event] == event } if event
+    # is_a?(Hash): the recorder stands in for the whole Logger interface, so a
+    # plain-String line must filter out, not raise TypeError from String#[].
+    selected = selected.select { |_, message| message.is_a?(Hash) && message[:event] == event } if event
     selected.map { |_, message| message }
   end
 end
