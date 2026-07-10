@@ -7,6 +7,7 @@ Ingests GitHub PushEvents from the public Events API (unauthenticated), persists
 ## Requirements
 
 - Docker Desktop (macOS) — nothing else; all dependencies live in Compose.
+- Developed on Linux/amd64; the app image also builds and passes the full test suite on `linux/arm64` (Apple Silicon) under QEMU emulation.
 
 ## Start the System
 
