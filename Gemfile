@@ -5,7 +5,7 @@ source "https://rubygems.org"
 # the image build if they ever drift.
 ruby file: ".ruby-version"
 
-gem "rails", "~> 8.1.3"
+gem "rails", "~> 8.1.4"
 # Use postgresql as the database for Active Record
 gem "pg", "~> 1.1"
 
