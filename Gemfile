@@ -7,7 +7,7 @@ ruby file: ".ruby-version"
 
 gem "rails", "~> 8.1.3"
 # Use postgresql as the database for Active Record
-gem "pg", "~> 1.1"
+gem "pg", "~> 1.7"
 
 # Postgres-backed Active Job adapter — job durability = database durability,
 # one system of record (docs/DECISIONS.md D-002, D-010)
